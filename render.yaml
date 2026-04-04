@@ -1,0 +1,50 @@
+# Render 部署設定檔 — THSRC Sniper v2.0
+# LINE & Telegram 雙指令控制 + 6 小時保活
+
+services:
+  - type: web               # Web Service（接收 Webhook）
+    name: thsr-online
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+
+    # ── 環境變數 ──
+    envVars:
+      # ── Telegram Bot ──
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false           # 在 Dashboard 手動填入
+      - key: ADMIN_TELEGRAM_CHAT_ID
+        sync: false           # 管理員 Chat ID
+
+      # ── LINE Messaging API ──
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+
+      # ── Render 設定 ──
+      - key: RENDER_EXTERNAL_URL
+        sync: false           # e.g. https://thsr-online.onrender.com
+
+      # ── 訂票預設值（可透過 Bot 指令修改） ──
+      - key: THSRC_ID
+        sync: false           # 身分證字號
+      - key: THSRC_PHONE
+        sync: false           # 手機號碼
+      - key: FROM_STATION
+        value: 南港
+      - key: TO_STATION
+        value: 左營
+      - key: TRAVEL_DATE
+        sync: false           # 格式: 2025/06/01
+      - key: TRAVEL_TIME
+        sync: false           # 格式: 07:30
+      - key: ADULT_COUNT
+        value: "1"
+      - key: SEAT_TYPE
+        value: 無座位偏好
+      - key: MAX_RETRIES
+        value: "30"
+      - key: RETRY_INTERVAL
+        value: "3"
+      - key: MODEL_PATH
+        value: model/thsrc_cnn_model.hdf5
