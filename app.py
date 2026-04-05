@@ -76,6 +76,15 @@ def save_user(user_id: str, data: dict):
         _save_users(users)
 
 
+# ── 角色定義 ──
+ROLE_SUPERADMIN = "superadmin"
+ROLE_ADMIN = "admin"
+ROLE_USER = "user"
+
+# ── Super Admin Chat ID（從環境變數讀取，不寫入程式碼）──
+SUPERADMIN_CHAT_ID = os.environ.get("SUPERADMIN_CHAT_ID", "")
+
+
 def register_user(chat_id: str, name: str, username: str = "") -> tuple[str, str]:
     """
     Telegram 註冊新用戶或取得現有用戶狀態
@@ -87,7 +96,25 @@ def register_user(chat_id: str, name: str, username: str = "") -> tuple[str, str
     if existing:
         return existing.get("status", "pending"), user_id
 
-    # 新建用戶
+    # Super Admin 自動核准
+    if str(chat_id) == SUPERADMIN_CHAT_ID:
+        now = datetime.now().isoformat()
+        user_data = {
+            "provider": "telegram",
+            "provider_id": chat_id,
+            "name": name or "Owner",
+            "username": username,
+            "status": "approved",
+            "role": ROLE_SUPERADMIN,
+            "telegram_chat_id": chat_id,
+            "created_at": now,
+            "reviewed_at": now,
+        }
+        save_user(user_id, user_data)
+        log.info(f"👑 Super Admin {chat_id} 自動核准")
+        return "approved", user_id
+
+    # 新建一般用戶
     now = datetime.now().isoformat()
     user_data = {
         "provider": "telegram",
@@ -95,6 +122,7 @@ def register_user(chat_id: str, name: str, username: str = "") -> tuple[str, str
         "name": name,
         "username": username,
         "status": "pending",
+        "role": ROLE_USER,
         "telegram_chat_id": chat_id,
         "created_at": now,
         "reviewed_at": None,
@@ -114,6 +142,8 @@ def approve_user(user_id: str) -> bool:
     if not user:
         return False
     user["status"] = "approved"
+    if not user.get("role"):
+        user["role"] = ROLE_USER
     user["reviewed_at"] = datetime.now().isoformat()
     save_user(user_id, user)
     return True
@@ -136,9 +166,26 @@ def is_user_approved(user_id: str) -> bool:
     return user is not None and user.get("status") == "approved"
 
 
+def is_superadmin(chat_id: str) -> bool:
+    """檢查是否為 Super Admin"""
+    return str(chat_id) == SUPERADMIN_CHAT_ID
+
+
 def is_admin_telegram(chat_id: str) -> bool:
-    """檢查是否為 Telegram 管理員"""
+    """檢查是否為 Telegram 管理員（Super Admin 或 env 指定的 Admin）"""
+    if is_superadmin(chat_id):
+        return True
     return ADMIN_TG_CHAT_ID and str(chat_id) == str(ADMIN_TG_CHAT_ID)
+
+
+def get_user_role(chat_id: str) -> str:
+    """取得用戶角色"""
+    if is_superadmin(chat_id):
+        return ROLE_SUPERADMIN
+    user = get_user(f"tg_{chat_id}")
+    if user:
+        return user.get("role", ROLE_USER)
+    return ROLE_USER
 
 
 # ═══════════════════════════════════════════════════════════
@@ -446,7 +493,12 @@ def answer_callback(callback_query_id: str, text: str = ""):
 
 
 def notify_admin(text: str):
-    if ADMIN_TG_CHAT_ID:
+    """通知所有管理員（Super Admin + env Admin）"""
+    sent = set()
+    if SUPERADMIN_CHAT_ID:
+        send_telegram(SUPERADMIN_CHAT_ID, text)
+        sent.add(SUPERADMIN_CHAT_ID)
+    if ADMIN_TG_CHAT_ID and ADMIN_TG_CHAT_ID not in sent:
         send_telegram(ADMIN_TG_CHAT_ID, text)
 
 
@@ -456,16 +508,36 @@ def notify_admin(text: str):
 
 def notify_admin_new_user(user_id: str, user_data: dict):
     """新用戶註冊 → 通知管理員 Telegram（附核准/拒絕按鈕）"""
-    if not ADMIN_TG_CHAT_ID:
-        log.warning("⚠️ ADMIN_TELEGRAM_CHAT_ID 未設定，無法通知管理員")
+    # 通知 Super Admin（優先）
+    notify_targets = set()
+    if SUPERADMIN_CHAT_ID:
+        notify_targets.add(SUPERADMIN_CHAT_ID)
+    if ADMIN_TG_CHAT_ID:
+        notify_targets.add(ADMIN_TG_CHAT_ID)
+
+    if not notify_targets:
+        log.warning("⚠️ 無管理員可通知")
         return
+
+    # 遮蔽敏感資訊：只顯示用戶名稱和 ID，不暴露完整 provider_id
+    display_name = user_data.get('name', '未知')
+    display_username = user_data.get('username', '')
+    if display_username:
+        display_account = f"@{display_username}"
+    else:
+        # 遮蔽 Chat ID 中間數字
+        pid = str(user_data.get('provider_id', ''))
+        if len(pid) > 4:
+            display_account = f"{pid[:2]}***{pid[-2:]}"
+        else:
+            display_account = pid
 
     text = "\n".join([
         "🆕 <b>新用戶註冊申請</b>",
         "",
-        f"👤 姓名：<b>{user_data.get('name', '未知')}</b>",
+        f"👤 姓名：<b>{display_name}</b>",
         f"📡 來源：📨 Telegram",
-        f"🔖 帳號：{user_data.get('username') or user_data.get('provider_id', '-')}",
+        f"🔖 帳號：{display_account}",
         f"🆔 ID：<code>{user_id}</code>",
         f"🕐 時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "",
@@ -479,7 +551,8 @@ def notify_admin_new_user(user_id: str, user_data: dict):
         ]]
     }
 
-    send_telegram(ADMIN_TG_CHAT_ID, text, reply_markup=buttons)
+    for target_id in notify_targets:
+        send_telegram(target_id, text, reply_markup=buttons)
 
 
 def handle_admin_callback(data: dict):
@@ -896,24 +969,27 @@ def telegram_webhook():
     if is_admin_telegram(chat_id):
         admin_uid = f"tg_{chat_id}"
         admin_user = get_user(admin_uid)
+        role = ROLE_SUPERADMIN if is_superadmin(chat_id) else ROLE_ADMIN
         if not admin_user or admin_user.get("status") != "approved":
             save_user(admin_uid, {
                 "provider": "telegram", "provider_id": chat_id,
                 "name": name or "Admin", "username": username,
-                "status": "approved", "telegram_chat_id": chat_id,
+                "status": "approved", "role": role,
+                "telegram_chat_id": chat_id,
                 "created_at": datetime.now().isoformat(),
                 "reviewed_at": datetime.now().isoformat(),
             })
-            log.info(f"🔐 管理員 {chat_id} 已自動核准")
+            log.info(f"🔐 {'👑 Super Admin' if role == ROLE_SUPERADMIN else '管理員'} {chat_id} 已自動核准")
 
     # /start → 處理註冊
     if cmd == "start":
         if is_admin_telegram(chat_id):
+            role_label = "👑 Super Admin" if is_superadmin(chat_id) else "🔧 Admin"
             send_telegram(chat_id, "\n".join([
-                f"👑 嗨 <b>{name}</b>！您是管理員 🚅",
+                f"👑 嗨 <b>{name}</b>！歡迎回來 🚅",
                 "",
-                f"Chat ID：<code>{chat_id}</code>",
-                "狀態：<b>✅ 已核准 (Super Admin)</b>",
+                f"角色：<b>{role_label}</b>",
+                "狀態：<b>✅ 已核准</b>",
                 "",
                 "📌 /search — 快速查詢時刻表",
                 "📌 /help — 所有指令",
@@ -1118,8 +1194,25 @@ def startup():
     register_telegram_webhook()
     set_telegram_commands()
 
-    # 管理員自動核准
-    if ADMIN_TG_CHAT_ID:
+    # Super Admin 自動建立（最高權限）
+    sa_id = f"tg_{SUPERADMIN_CHAT_ID}"
+    sa_user = get_user(sa_id)
+    if not sa_user or sa_user.get("role") != ROLE_SUPERADMIN:
+        save_user(sa_id, {
+            "provider": "telegram",
+            "provider_id": SUPERADMIN_CHAT_ID,
+            "name": "Owner",
+            "username": "",
+            "status": "approved",
+            "role": ROLE_SUPERADMIN,
+            "telegram_chat_id": SUPERADMIN_CHAT_ID,
+            "created_at": datetime.now().isoformat(),
+            "reviewed_at": datetime.now().isoformat(),
+        })
+        log.info("  👑 Super Admin 帳號已自動建立")
+
+    # 環境變數指定的管理員（如有設定且不是 Super Admin）
+    if ADMIN_TG_CHAT_ID and ADMIN_TG_CHAT_ID != SUPERADMIN_CHAT_ID:
         admin_id = f"tg_{ADMIN_TG_CHAT_ID}"
         if not get_user(admin_id):
             save_user(admin_id, {
@@ -1128,6 +1221,7 @@ def startup():
                 "name": "Admin",
                 "username": "",
                 "status": "approved",
+                "role": ROLE_ADMIN,
                 "telegram_chat_id": ADMIN_TG_CHAT_ID,
                 "created_at": datetime.now().isoformat(),
                 "reviewed_at": datetime.now().isoformat(),

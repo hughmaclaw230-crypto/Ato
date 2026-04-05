@@ -14,6 +14,8 @@ services:
         sync: false           # 在 Dashboard 手動填入
       - key: ADMIN_TELEGRAM_CHAT_ID
         sync: false           # 管理員 Chat ID
+      - key: SUPERADMIN_CHAT_ID
+        sync: false           # 最高權限擁有者 Chat ID
 
       # ── Render 設定 ──
       - key: RENDER_EXTERNAL_URL
