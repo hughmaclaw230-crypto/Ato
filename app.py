@@ -25,6 +25,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
+app.json.ensure_ascii = False  # JSON 回應顯示中文而非 Unicode 轉義
 
 # ─── 環境變數 ─────────────────────────────────────────
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
