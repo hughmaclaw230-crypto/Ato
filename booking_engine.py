@@ -9,11 +9,12 @@ import io
 import time
 import asyncio
 import logging
-import numpy as np
 from datetime import datetime
-from PIL import Image
 
 log = logging.getLogger(__name__)
+
+# numpy / PIL / tensorflow / playwright 延遲載入
+# 只在實際呼叫訂票時才 import，避免 requirements 精簡後 crash
 
 THSRC_URL = "https://irs.thsrc.com.tw/IMINT/"
 
@@ -64,7 +65,9 @@ def get_model():
     return _model
 
 
-def preprocess_captcha(img_bytes: bytes) -> np.ndarray:
+def preprocess_captcha(img_bytes: bytes):
+    import numpy as np
+    from PIL import Image
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     img = img.resize((140, 140), Image.LANCZOS)
     arr = np.array(img) / 255.0
@@ -72,6 +75,7 @@ def preprocess_captcha(img_bytes: bytes) -> np.ndarray:
 
 
 def decode_captcha(model, img_bytes: bytes) -> str:
+    import numpy as np
     x = preprocess_captcha(img_bytes)
     preds = model.predict(x, verbose=0)
     result = ""
@@ -85,7 +89,13 @@ def decode_captcha(model, img_bytes: bytes) -> str:
 # ─── 訂票主邏輯 ────────────────────────────────────────
 
 def run_booking(config: dict, status: dict) -> dict:
-    """同步入口，內部跑 asyncio"""
+    """同步入口，內部跑 asyncio。需要 numpy, Pillow, tensorflow, playwright 已安裝。"""
+    try:
+        import numpy  # noqa: F401
+        from PIL import Image  # noqa: F401
+    except ImportError as e:
+        return {"success": False, "error": f"缺少訂票依賴套件: {e}"}
+
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:

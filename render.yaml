@@ -46,5 +46,3 @@ services:
         value: "30"
       - key: RETRY_INTERVAL
         value: "3"
-      - key: MODEL_PATH
-        value: model/thsrc_cnn_model.hdf5
