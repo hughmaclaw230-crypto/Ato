@@ -15,6 +15,8 @@ import requests
 from pathlib import Path
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
+from telegram_form import (start_search_form, handle_form_callback,
+                           get_completed_form, clear_form, parse_smart_search)
 
 # ─── 設定 ───────────────────────────────────────────────
 logging.basicConfig(
@@ -554,7 +556,7 @@ def handle_admin_callback(data: dict):
 # ═══════════════════════════════════════════════════════════
 
 # 不需要核准就能用的指令
-OPEN_COMMANDS = {"start", "help", "status"}
+OPEN_COMMANDS = {"start", "help", "status", "search"}
 
 
 def get_config_summary() -> str:
@@ -592,31 +594,24 @@ def get_help_text() -> str:
     return "\n".join([
         "📖 <b>AutoTHSR 指令一覽</b>",
         "",
-        "🔍 <b>時刻表查詢</b>",
+        "🔍 <b>快速查詢（推薦）</b>",
+        "/search &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; [時間]",
+        "  <code>/search 高雄 台北 明天 18:00</code>",
+        "  <code>/search 左營 台北 後天</code>",
+        "  💡 /search （無參數）→ 互動表單",
+        "",
+        "🗂 <b>進階時刻表</b>",
         "/timetable &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; [時間]",
-        "  範例: /timetable 台北 左營 2026/04/10 08:00",
-        "  範例: /timetable 南港 台中 2026/04/10",
         "",
         "🔧 <b>訂票設定</b>",
-        "/from &lt;站名&gt; — 出發站",
-        "/to &lt;站名&gt; — 到達站",
-        "/date &lt;日期&gt; — 日期（2026/04/10）",
-        "/time &lt;時間&gt; — 時間（07:30）",
-        "/count &lt;人數&gt; — 成人票數",
-        "/seat &lt;偏好&gt; — 座位偏好",
-        "/id &lt;身分證&gt; — 身分證字號",
-        "/phone &lt;手機&gt; — 手機號碼",
+        "/from /to /date /time /count /seat /id /phone",
         "",
         "🚀 <b>操作</b>",
-        "/book — 開始訂票",
-        "/stop — 停止訂票",
-        "/status — 訂票狀態",
-        "/settings — 目前設定",
+        "/book — 開始訂票 | /stop — 停止",
+        "/status — 狀態 | /settings — 設定",
         "",
         "📊 <b>其他</b>",
-        "/stations — 車站列表",
-        "/times — 可選時段",
-        "/help — 本說明",
+        "/stations — 車站列表 | /help — 本說明",
     ])
 
 
@@ -635,6 +630,9 @@ def process_command(cmd: str, args: str) -> str:
             r = s["last_result"]
             return f"📋 上次訂票結果：{'✅ 成功' if r.get('success') else '❌ 失敗'}\n時間：{s['last_run']}"
         return "📋 尚未執行過訂票\n輸入 /settings 查看設定\n輸入 /book 開始訂票"
+    elif cmd == "search":
+        # search 在 webhook 層處理（需要 reply_markup）
+        return "💡 請直接使用 /search 指令"
     elif cmd == "timetable":
         return handle_timetable_command(args)
     elif cmd == "from":
@@ -839,8 +837,37 @@ def telegram_webhook():
     touch_session()
     data = request.get_json(silent=True) or {}
 
-    # 處理管理員按鈕回調
+    # 處理按鈕回調 (管理員審核 + 搜尋表單)
     if "callback_query" in data:
+        cb = data["callback_query"]
+        cb_data = cb.get("data", "")
+        cb_chat_id = str(cb["message"]["chat"]["id"]) if cb.get("message") else ""
+
+        if cb_data.startswith("sf:"):
+            # 搜尋表單回調
+            answer_callback(cb["id"])
+            text, markup, is_final = handle_form_callback(cb_chat_id, cb_data)
+
+            if is_final:
+                # 表單完成 → 執行查詢
+                form = get_completed_form(cb_chat_id)
+                if form:
+                    clear_form(cb_chat_id)
+                    result = query_thsr_timetable(
+                        form["from_station"], form["to_station"],
+                        form["date"], form["time"])
+                    edit_telegram_message(cb_chat_id, cb["message"]["message_id"],
+                                          "🔍 查詢中...")
+                    send_telegram(cb_chat_id, result)
+                else:
+                    send_telegram(cb_chat_id, "❌ 表單資料不完整，請重新 /search")
+            elif markup:
+                edit_telegram_message(cb_chat_id, cb["message"]["message_id"], text)
+                send_telegram(cb_chat_id, text, reply_markup=markup)
+            else:
+                edit_telegram_message(cb_chat_id, cb["message"]["message_id"], text)
+            return jsonify({"ok": True})
+
         handle_admin_callback(data)
         return jsonify({"ok": True})
 
@@ -865,8 +892,34 @@ def telegram_webhook():
     cmd = cmd_match.group(1).lower()
     args = cmd_match.group(2).strip()
 
+    # ── 管理員自動核准 ──
+    if is_admin_telegram(chat_id):
+        admin_uid = f"tg_{chat_id}"
+        admin_user = get_user(admin_uid)
+        if not admin_user or admin_user.get("status") != "approved":
+            save_user(admin_uid, {
+                "provider": "telegram", "provider_id": chat_id,
+                "name": name or "Admin", "username": username,
+                "status": "approved", "telegram_chat_id": chat_id,
+                "created_at": datetime.now().isoformat(),
+                "reviewed_at": datetime.now().isoformat(),
+            })
+            log.info(f"🔐 管理員 {chat_id} 已自動核准")
+
     # /start → 處理註冊
     if cmd == "start":
+        if is_admin_telegram(chat_id):
+            send_telegram(chat_id, "\n".join([
+                f"👑 嗨 <b>{name}</b>！您是管理員 🚅",
+                "",
+                f"Chat ID：<code>{chat_id}</code>",
+                "狀態：<b>✅ 已核准 (Super Admin)</b>",
+                "",
+                "📌 /search — 快速查詢時刻表",
+                "📌 /help — 所有指令",
+            ]))
+            return jsonify({"ok": True})
+
         status, user_id = register_user(chat_id, name, username)
 
         if status == "new":
@@ -876,7 +929,6 @@ def telegram_webhook():
                 "📝 您的帳號已建立，目前狀態：<b>⏳ 待審核</b>",
                 "",
                 "管理者會收到通知，審核通過後您將收到訊息 📩",
-                "",
                 "輸入 /help 預覽可用指令",
             ]))
         elif status == "pending":
@@ -895,6 +947,41 @@ def telegram_webhook():
             ]))
         elif status == "rejected":
             send_telegram(chat_id, "⚠️ 您的帳號未通過審核，請聯繫管理者。")
+
+        return jsonify({"ok": True})
+
+    # /search → 智慧搜尋（管理員 + 已核准用戶）
+    if cmd == "search":
+        # 檢查權限（管理員直接通過，其他檢查核准）
+        if not is_admin_telegram(chat_id) and not is_user_approved(f"tg_{chat_id}"):
+            send_telegram(chat_id, "⏳ 請先 /start 註冊並等待審核")
+            return jsonify({"ok": True})
+
+        if args.strip():
+            parsed = parse_smart_search(args)
+            if parsed:
+                send_telegram(chat_id, "🔍 查詢中...")
+                result = query_thsr_timetable(
+                    parsed["from_station"], parsed["to_station"],
+                    parsed["date"], parsed["time"])
+                send_telegram(chat_id, result)
+            else:
+                send_telegram(chat_id, "\n".join([
+                    "❌ 格式錯誤",
+                    "",
+                    "📝 <b>用法：</b>",
+                    "<code>/search 出發站 到達站 日期 [時間]</code>",
+                    "",
+                    "📝 <b>範例：</b>",
+                    "<code>/search 高雄 台北 明天 18:00</code>",
+                    "<code>/search 左營 台北 2026/04/06</code>",
+                    "",
+                    "💡 支援：高雄→左營、北車→台北",
+                    "💡 日期：今天/明天/後天 或 YYYY/MM/DD",
+                ]))
+        else:
+            text, markup = start_search_form(chat_id)
+            send_telegram(chat_id, text, reply_markup=markup)
 
         return jsonify({"ok": True})
 
@@ -999,20 +1086,14 @@ def set_telegram_commands():
         return
     commands = [
         {"command": "start", "description": "註冊 / 歡迎"},
+        {"command": "search", "description": "🔍 快速查詢時刻表"},
         {"command": "help", "description": "顯示說明"},
-        {"command": "timetable", "description": "查詢高鐵時刻表"},
+        {"command": "timetable", "description": "查詢高鐵時刻表（進階）"},
         {"command": "settings", "description": "查看設定"},
         {"command": "book", "description": "開始訂票"},
         {"command": "stop", "description": "停止訂票"},
         {"command": "status", "description": "訂票狀態"},
-        {"command": "from", "description": "出發站"},
-        {"command": "to", "description": "到達站"},
-        {"command": "date", "description": "出發日期"},
-        {"command": "time", "description": "出發時間"},
-        {"command": "count", "description": "票數"},
-        {"command": "seat", "description": "座位偏好"},
         {"command": "stations", "description": "車站列表"},
-        {"command": "times", "description": "可選時段"},
     ]
     url = f"https://api.telegram.org/bot{TG_TOKEN}/setMyCommands"
     try:
