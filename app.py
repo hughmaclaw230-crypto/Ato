@@ -12,11 +12,14 @@ import time
 import logging
 import threading
 import requests
-from pathlib import Path
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
 from telegram_form import (start_search_form, handle_form_callback,
                            get_completed_form, clear_form, parse_smart_search)
+from firestore_db import (
+    get_user, save_user, get_pending_users, get_all_users,
+    get_db as get_firestore_db,
+)
 
 # ─── 設定 ───────────────────────────────────────────────
 logging.basicConfig(
@@ -36,44 +39,10 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 PORT = int(os.environ.get("PORT", "5000"))
 
 # ═══════════════════════════════════════════════════════════
-#  用戶資料庫（JSON 檔案持久化）
+#  用戶資料庫（Firestore 雲端持久化）
+#  get_user / save_user / get_pending_users / get_all_users
+#  均從 firestore_db 模組匯入
 # ═══════════════════════════════════════════════════════════
-
-USERS_FILE = Path("data/users.json")
-_users_lock = threading.Lock()
-
-
-def _load_users() -> dict:
-    """從 JSON 讀取用戶資料"""
-    if not USERS_FILE.exists():
-        return {}
-    try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
-
-def _save_users(users: dict):
-    """寫入用戶資料"""
-    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
-
-
-def get_user(user_id: str) -> dict | None:
-    """取得用戶資料"""
-    with _users_lock:
-        users = _load_users()
-        return users.get(user_id)
-
-
-def save_user(user_id: str, data: dict):
-    """新增/更新用戶"""
-    with _users_lock:
-        users = _load_users()
-        users[user_id] = data
-        _save_users(users)
 
 
 # ── 角色定義 ──
@@ -555,21 +524,7 @@ def notify_admin_new_user(user_id: str, user_data: dict):
         send_telegram(target_id, text, reply_markup=buttons)
 
 
-def get_pending_users() -> list[tuple[str, dict]]:
-    """取得所有待審核的用戶"""
-    with _users_lock:
-        users = _load_users()
-    return [
-        (uid, udata) for uid, udata in users.items()
-        if udata.get("status") == "pending"
-    ]
-
-
-def get_all_users() -> list[tuple[str, dict]]:
-    """取得所有用戶"""
-    with _users_lock:
-        users = _load_users()
-    return list(users.items())
+# get_pending_users / get_all_users 已從 firestore_db 匯入
 
 
 def notify_pending_users_to_admin():
@@ -1212,11 +1167,19 @@ def health():
     elapsed = (datetime.now() - _last_activity).total_seconds()
     session_remaining = max(0, SESSION_TIMEOUT - elapsed)
 
+    # 檢查 Firestore 連線
+    try:
+        get_firestore_db()
+        firestore_ok = True
+    except Exception:
+        firestore_ok = False
+
     return jsonify({
         "status": "ok",
         "service": "AutoTHSR (ATO)",
         "timestamp": datetime.now().isoformat(),
         "telegram_bot": bool(TG_TOKEN),
+        "firestore": firestore_ok,
         "session": {
             "active": is_session_alive(),
             "remaining_minutes": round(session_remaining / 60, 1),
@@ -1234,8 +1197,8 @@ def health():
 def index():
     return jsonify({
         "name": "🚅 AutoTHSR (ATO)",
-        "version": "3.0",
-        "description": "高鐵自動訂票 + 時刻表查詢 — Telegram 指令控制 + 管理員審核",
+        "version": "3.1",
+        "description": "高鐵自動訂票 + 時刻表查詢 — Telegram 指令控制 + Firestore 持久化",
         "session_timeout": "6 小時",
         "endpoints": {
             "health": "/api/health",
@@ -1299,8 +1262,13 @@ def startup():
     log.info(f"  Render URL: {RENDER_EXTERNAL_URL or '(local)'}")
     log.info(f"  Session: {SESSION_TIMEOUT // 3600}h | Keep-alive: {KEEPALIVE_INTERVAL // 60}min")
 
-    # 確保 data 目錄存在
-    Path("data").mkdir(exist_ok=True)
+    # 初始化 Firestore
+    try:
+        get_firestore_db()
+        log.info("  🔥 Firestore 已連線")
+    except Exception as e:
+        log.error(f"  ❌ Firestore 連線失敗: {e}")
+        log.error("  ⚠️ 用戶資料將無法持久化！")
 
     register_telegram_webhook()
     set_telegram_commands()

@@ -17,6 +17,10 @@ services:
       - key: SUPERADMIN_CHAT_ID
         sync: false           # 最高權限擁有者 Chat ID
 
+      # ── Firebase / Firestore ──
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false           # Firebase Service Account JSON（完整 JSON 字串）
+
       # ── Render 設定 ──
       - key: RENDER_EXTERNAL_URL
         sync: false           # e.g. https://ato.onrender.com
