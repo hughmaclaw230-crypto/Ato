@@ -1,146 +1,56 @@
-# 🚅 THSRC Sniper v2.0 — LINE & Telegram 雙指令控制
+# 🚅 AutoTHSR (ATO)
 
-高鐵自動訂票系統，透過 **LINE** 或 **Telegram** 傳送指令即可設定並觸發訂票。
-使用 CNN 辨識驗證碼，成功後即時通知。
+高鐵自動訂票 + 時刻表查詢 — Telegram Bot 指令控制 + 管理員審核
 
-## 特色
+## 功能
 
-- 🤖 **雙 Bot 控制** — LINE + Telegram 同時接收指令
-- 💬 **中文指令** — LINE 支援中文指令（如「訂票」、「設定」）
-- ⚙️ **即時設定** — 透過訊息修改出發站、日期、時間等
-- 🏓 **6 小時保活** — 收到訊息自動重置 session，防止 Render 休眠
-- 🔄 **背景訂票** — 訂票在背景執行，完成後自動通知
+- 🔍 **高鐵時刻表查詢** — 即時查詢任意站點的高鐵班次
+- 🤖 **Telegram Bot 控制** — 透過 Telegram 指令操作一切
+- 🔐 **用戶認證審核** — 只有管理員核准的用戶才能使用
+- ⏱️ **6 小時保活** — 收到訊息自動重置計時
+- 🚅 **自動訂票** — CNN 驗證碼辨識 + Playwright 自動化
 
-## 檔案結構
+## Telegram 指令
 
-```
-thsr-online/
-├── app.py               # Flask 主服務（Webhook 入口）
-├── wsgi.py              # Gunicorn WSGI 入口
-├── booking_engine.py    # Playwright + CNN 訂票引擎
-├── start.sh             # 啟動腳本
-├── Dockerfile           # Docker 設定
-├── render.yaml          # Render 服務設定
-├── requirements.txt
-├── main.py              # (舊版) 單次執行版本
-└── model/
-    └── thsrc_cnn_model.hdf5   # CNN 模型（自行下載）
-```
+| 指令 | 說明 |
+|------|------|
+| `/start` | 註冊 / 歡迎 |
+| `/help` | 顯示所有指令 |
+| `/timetable <出發站> <到達站> <日期> [時間]` | 查詢高鐵時刻表 |
+| `/from <站名>` | 設定出發站 |
+| `/to <站名>` | 設定到達站 |
+| `/date <日期>` | 設定出發日期 |
+| `/time <時間>` | 設定出發時間 |
+| `/count <人數>` | 設定票數 |
+| `/seat <偏好>` | 設定座位偏好 |
+| `/id <身分證>` | 設定身分證字號 |
+| `/phone <手機>` | 設定手機號碼 |
+| `/book` | 開始訂票 |
+| `/stop` | 停止訂票 |
+| `/status` | 查看訂票狀態 |
+| `/settings` | 查看目前設定 |
+| `/stations` | 車站列表 |
+| `/times` | 可選時段 |
 
----
+## 部署到 Render
 
-## 指令一覽
+### 環境變數
 
-### 共用指令（Telegram / LINE）
-
-| 指令 | 中文（LINE） | 說明 |
-|------|-------------|------|
-| `/help` | 幫助 | 顯示說明 |
-| `/settings` | 設定 | 查看目前設定 |
-| `/from <站名>` | 出發站 <站名> | 設定出發站 |
-| `/to <站名>` | 到達站 <站名> | 設定到達站 |
-| `/date <日期>` | 日期 <日期> | 設定日期（例：2025/06/01）|
-| `/time <時間>` | 時間 <時間> | 設定時間（例：07:30）|
-| `/count <人數>` | 人數 <N> | 設定成人票數 |
-| `/seat <偏好>` | 座位 <偏好> | 無座位偏好/靠窗/靠走道 |
-| `/id <身分證>` | 身分證 <號碼> | 設定身分證字號 |
-| `/phone <手機>` | 手機 <號碼> | 設定手機號碼 |
-| `/book` | 訂票 / 搶票 | 開始訂票 |
-| `/stop` | 停止 / 取消 | 停止訂票 |
-| `/status` | 狀態 | 查看訂票進度 |
-| `/stations` | 車站 | 車站列表 |
-| `/times` | 時段 | 可選時段列表 |
-
----
-
-## 部署步驟
-
-### 1. 取得 CNN 模型
-
-```bash
-mkdir -p model
-wget https://github.com/maxmilian/thsrc_captcha/raw/master/thsrc_cnn_model.hdf5 \
-     -O model/thsrc_cnn_model.hdf5
-```
-
-### 2. 推到 GitHub
-
-```bash
-git init
-git add .
-git commit -m "THSRC Sniper v2.0"
-git remote add origin https://github.com/你的帳號/thsr-online.git
-git push -u origin main
-```
-
-### 3. 在 Render 建立 Web Service
-
-1. 登入 [render.com](https://render.com)
-2. **New → Web Service**
-3. 連接 GitHub repo
-4. Runtime 選 **Docker**
-5. 名稱設為 `thsr-online`
-
-### 4. 設定 Environment Variables
-
-必填：
-
-| 變數名稱 | 說明 |
-|---|---|
+| 變數 | 說明 |
+|------|------|
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
-| `ADMIN_TELEGRAM_CHAT_ID` | 管理員 Chat ID |
-| `LINE_CHANNEL_SECRET` | LINE Channel Secret |
-| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Channel Access Token |
-| `RENDER_EXTERNAL_URL` | 如 `https://thsr-online.onrender.com` |
+| `ADMIN_TELEGRAM_CHAT_ID` | 管理員 Telegram Chat ID |
+| `RENDER_EXTERNAL_URL` | Render 外部 URL |
+| `THSRC_ID` | 身分證字號（可選） |
+| `THSRC_PHONE` | 手機號碼（可選） |
 
-選填（可透過 Bot 指令修改）：
+### 部署步驟
 
-| 變數名稱 | 預設 | 說明 |
-|---|---|---|
-| `THSRC_ID` | - | 身分證字號 |
-| `THSRC_PHONE` | - | 手機號碼 |
-| `FROM_STATION` | 南港 | 出發站 |
-| `TO_STATION` | 左營 | 到達站 |
+1. Push 到 GitHub
+2. 在 Render 建立 Web Service，連結此 repo
+3. 設定環境變數
+4. Deploy
 
-### 5. 設定 LINE Webhook
+## 車站列表
 
-部署成功後：
-1. 到 [LINE Developers Console](https://developers.line.biz/)
-2. 選擇你的 Messaging API Channel
-3. **Webhook URL** 設為：`https://thsr-online.onrender.com/api/webhook/line`
-4. 開啟 **Use webhook**
-
-Telegram webhook 會在啟動時自動註冊。
-
----
-
-## Session 保活機制
-
-- 啟動後自動保持 **6 小時** 活躍狀態
-- 每 5 分鐘 self-ping `/api/health` 防止 Render 休眠
-- 收到任何 LINE 或 Telegram 訊息會**自動重置計時器**
-- 6 小時後若無訊息，停止 keep-alive（Render 可能休眠）
-- 再次傳送訊息會**喚醒服務**並重新開始 6 小時計時
-
----
-
-## 取得 Bot 帳號
-
-### Telegram Bot
-1. 搜尋 **@BotFather**
-2. 發送 `/newbot`，取得 Token
-3. 搜尋 **@userinfobot** 取得你的 Chat ID
-
-### LINE Messaging API
-1. 到 [LINE Developers](https://developers.line.biz/)
-2. 建立 Provider → 建立 Messaging API Channel
-3. 取得 **Channel Secret** 和 **Channel Access Token**
-
----
-
-## 注意事項
-
-- 此工具僅供個人學習研究使用
-- 請勿用於大量搶票，避免違反高鐵服務條款
-- CNN 模型準確率約 97–99%，偶爾需重試幾次
-- Render 免費方案每月 750 小時，搭配保活機制綽綽有餘
+南港、台北、板橋、桃園、新竹、苗栗、台中、彰化、雲林、嘉義、台南、左營

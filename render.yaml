@@ -1,9 +1,9 @@
-# Render 部署設定檔 — THSRC Sniper v2.0
-# LINE & Telegram 雙指令控制 + 6 小時保活
+# Render 部署設定檔 — AutoTHSR (ATO) v3.0
+# Telegram 指令控制 + 高鐵時刻表查詢 + 6 小時保活
 
 services:
   - type: web               # Web Service（接收 Webhook）
-    name: thsr-online
+    name: ato
     runtime: docker
     dockerfilePath: ./Dockerfile
 
@@ -15,15 +15,9 @@ services:
       - key: ADMIN_TELEGRAM_CHAT_ID
         sync: false           # 管理員 Chat ID
 
-      # ── LINE Messaging API ──
-      - key: LINE_CHANNEL_SECRET
-        sync: false
-      - key: LINE_CHANNEL_ACCESS_TOKEN
-        sync: false
-
       # ── Render 設定 ──
       - key: RENDER_EXTERNAL_URL
-        sync: false           # e.g. https://thsr-online.onrender.com
+        sync: false           # e.g. https://ato.onrender.com
 
       # ── 訂票預設值（可透過 Bot 指令修改） ──
       - key: THSRC_ID
@@ -35,7 +29,7 @@ services:
       - key: TO_STATION
         value: 左營
       - key: TRAVEL_DATE
-        sync: false           # 格式: 2025/06/01
+        sync: false           # 格式: 2026/06/01
       - key: TRAVEL_TIME
         sync: false           # 格式: 07:30
       - key: ADULT_COUNT

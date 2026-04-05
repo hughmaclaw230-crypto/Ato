@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """
-THSRC Sniper v2.0 — Flask Web Service
-LINE & Telegram 雙 Bot 指令控制 + 用戶認證 + 管理員審核
+AutoTHSR (ATO) — Flask Web Service
+Telegram Bot 指令控制 + 用戶認證 + 管理員審核 + 高鐵時刻表查詢
 6 小時保活，收到訊息自動重置計時
 """
 
 import os
 import re
 import json
-import hmac
-import hashlib
-import base64
 import time
 import logging
 import threading
@@ -32,8 +29,6 @@ app = Flask(__name__)
 # ─── 環境變數 ─────────────────────────────────────────
 TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ADMIN_TG_CHAT_ID = os.environ.get("ADMIN_TELEGRAM_CHAT_ID", "")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 PORT = int(os.environ.get("PORT", "5000"))
 
@@ -64,7 +59,7 @@ def _save_users(users: dict):
 
 
 def get_user(user_id: str) -> dict | None:
-    """取得用戶資料（by tg_chatId or line_userId）"""
+    """取得用戶資料"""
     with _users_lock:
         users = _load_users()
         return users.get(user_id)
@@ -78,28 +73,13 @@ def save_user(user_id: str, data: dict):
         _save_users(users)
 
 
-def find_user_by_field(field: str, value: str) -> tuple[str, dict] | None:
-    """依欄位搜尋用戶"""
-    with _users_lock:
-        users = _load_users()
-        for uid, data in users.items():
-            if data.get(field) == value:
-                return uid, data
-    return None
-
-
-def register_user(provider: str, provider_id: str, name: str, username: str = "") -> tuple[str, str]:
+def register_user(chat_id: str, name: str, username: str = "") -> tuple[str, str]:
     """
-    註冊新用戶或取得現有用戶狀態
+    Telegram 註冊新用戶或取得現有用戶狀態
     回傳: (status, user_id)
     status: 'new' | 'pending' | 'approved' | 'rejected'
     """
-    # 檢查是否已存在
-    if provider == "telegram":
-        user_id = f"tg_{provider_id}"
-    else:
-        user_id = f"line_{provider_id}"
-
+    user_id = f"tg_{chat_id}"
     existing = get_user(user_id)
     if existing:
         return existing.get("status", "pending"), user_id
@@ -107,19 +87,15 @@ def register_user(provider: str, provider_id: str, name: str, username: str = ""
     # 新建用戶
     now = datetime.now().isoformat()
     user_data = {
-        "provider": provider,
-        "provider_id": provider_id,
+        "provider": "telegram",
+        "provider_id": chat_id,
         "name": name,
         "username": username,
         "status": "pending",
+        "telegram_chat_id": chat_id,
         "created_at": now,
         "reviewed_at": None,
     }
-
-    if provider == "telegram":
-        user_data["telegram_chat_id"] = provider_id
-    else:
-        user_data["line_user_id"] = provider_id
 
     save_user(user_id, user_data)
 
@@ -231,6 +207,13 @@ STATION_MAP = {
 }
 STATION_NAMES = list(STATION_MAP.keys())
 
+# 高鐵時刻表查詢用站名對應（英文 ID）
+STATION_EN_MAP = {
+    "南港": "NanGang", "台北": "TaiPei", "板橋": "BanQiao", "桃園": "TaoYuan",
+    "新竹": "HsinChu", "苗栗": "MiaoLi", "台中": "TaiChung", "彰化": "ChangHua",
+    "雲林": "YunLin", "嘉義": "ChiaYi", "台南": "TaiNan", "左營": "ZuoYing",
+}
+
 TIME_SLOTS = [
     "06:00", "06:30", "07:00", "07:30", "08:00", "08:30",
     "09:00", "09:30", "10:00", "10:30", "11:00", "11:30",
@@ -241,6 +224,168 @@ TIME_SLOTS = [
 ]
 
 SEAT_MAP = {"無座位偏好": "0", "靠窗": "1", "靠走道": "2"}
+
+
+# ═══════════════════════════════════════════════════════════
+#  高鐵時刻表查詢
+# ═══════════════════════════════════════════════════════════
+
+def query_thsr_timetable(from_station: str, to_station: str,
+                         date: str, time_str: str = "") -> str:
+    """
+    查詢高鐵時刻表
+    from_station / to_station: 中文站名
+    date: 格式 YYYY/MM/DD
+    time_str: 格式 HH:MM (可選)
+    回傳: 格式化的時刻表字串 (HTML)
+    """
+    from_en = STATION_EN_MAP.get(from_station)
+    to_en = STATION_EN_MAP.get(to_station)
+
+    if not from_en or not to_en:
+        return f"❌ 無效站名：{from_station} 或 {to_station}"
+
+    if from_en == to_en:
+        return "❌ 出發站與到達站不能相同"
+
+    # 預設時間為當前時間
+    if not time_str:
+        time_str = datetime.now().strftime("%H:%M")
+
+    # 確保日期格式正確
+    date = date.replace("-", "/")
+
+    url = "https://www.thsrc.com.tw/TimeTable/Search"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json, text/javascript, */*",
+        "Referer": "https://www.thsrc.com.tw/ArticleContent/a3b630bb-1066-4352-a1ef-58c7b4e8ef7c",
+        "Origin": "https://www.thsrc.com.tw",
+    }
+
+    payload = {
+        "SearchType": "S",
+        "Lang": "TW",
+        "StartStation": from_en,
+        "EndStation": to_en,
+        "OutWardSearchDate": date,
+        "OutWardSearchTime": time_str,
+        "ReturnSearchDate": date,
+        "ReturnSearchTime": time_str,
+        "DiscountType": "",
+    }
+
+    try:
+        log.info(f"🔍 查詢時刻表: {from_station}→{to_station} {date} {time_str}")
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        r = requests.post(url, data=payload, headers=headers, timeout=15, verify=False)
+
+        if r.status_code != 200:
+            log.warning(f"時刻表查詢失敗: HTTP {r.status_code}")
+            return f"❌ 查詢失敗 (HTTP {r.status_code})"
+
+        data = r.json()
+        return format_timetable_result(data, from_station, to_station, date, time_str)
+
+    except requests.exceptions.Timeout:
+        return "❌ 查詢逾時，請稍後再試"
+    except json.JSONDecodeError:
+        log.warning("時刻表回應不是 JSON 格式")
+        return "❌ 高鐵時刻表暫時無法查詢，請稍後再試"
+    except Exception as e:
+        log.error(f"時刻表查詢錯誤: {e}")
+        return f"❌ 查詢失敗: {str(e)[:50]}"
+
+
+def format_timetable_result(data: dict, from_st: str, to_st: str,
+                            date: str, time_str: str) -> str:
+    """格式化時刻表查詢結果 — 基於 thsrc.com.tw API 回傳結構"""
+
+    # API 回傳結構: { success: true, data: { DepartureTable: { TrainItem: [...] } } }
+    trains = []
+
+    if isinstance(data, dict):
+        # 正式結構
+        inner = data.get("data", data)
+
+        # 取得 DepartureTable.TrainItem
+        dep_table = inner.get("DepartureTable", {})
+        if isinstance(dep_table, dict):
+            trains = dep_table.get("TrainItem", [])
+
+        # 如果沒有，嘗試其他 key
+        if not trains:
+            for key in ["TrainItem", "ResultList", "Trains", "items"]:
+                if key in inner and isinstance(inner[key], list):
+                    trains = inner[key]
+                    break
+
+    lines = [
+        f"🚅 <b>高鐵時刻表查詢結果</b>",
+        f"",
+        f"📍 {from_st} → {to_st}",
+        f"📅 {date}　🕐 {time_str} 起",
+        f"─────────────────",
+    ]
+
+    if not trains:
+        lines.append("")
+        lines.append("📋 未找到符合的班次")
+        lines.append("💡 可能原因：日期超出範圍或無此區間列車")
+        return "\n".join(lines)
+
+    # 限制顯示前 8 班
+    display_trains = trains[:8] if len(trains) > 8 else trains
+
+    for i, train in enumerate(display_trains):
+        if not isinstance(train, dict):
+            continue
+
+        train_no = train.get("TrainNumber", f"#{i+1}")
+        depart = train.get("DepartureTime", "-")
+        arrive = train.get("DestinationTime", train.get("ArrivalTime", "-"))
+        duration = train.get("Duration", "")
+        non_reserved = train.get("NonReservedCar", "")
+        note = train.get("Note", "")
+
+        # 折扣資訊
+        discounts = train.get("Discount", [])
+        discount_text = ""
+        if discounts and isinstance(discounts, list):
+            disc_names = [d.get("Name", "") for d in discounts if isinstance(d, dict)]
+            disc_names = [n for n in disc_names if n]
+            if disc_names:
+                discount_text = "🏷" + "/".join(disc_names)
+
+        line = f"🔹 <b>{train_no}</b>　{depart} → {arrive}"
+        if duration:
+            line += f"　⏱{duration}"
+        lines.append(line)
+
+        # 附加資訊（第二行）
+        extras = []
+        if non_reserved:
+            extras.append(f"🚃自由座:{non_reserved}")
+        if discount_text:
+            extras.append(discount_text)
+        if note:
+            extras.append(f"📌{note}")
+        if extras:
+            lines.append(f"     {' | '.join(extras)}")
+
+    if len(trains) > 8:
+        lines.append(f"\n... 還有 {len(trains) - 8} 班次")
+
+    lines.append("")
+    lines.append(f"💡 共 {len(trains)} 班次")
+
+    return "\n".join(lines)
+
+
+
+
 
 
 # ═══════════════════════════════════════════════════════════
@@ -297,59 +442,6 @@ def answer_callback(callback_query_id: str, text: str = ""):
         pass
 
 
-def send_line_reply(reply_token: str, messages: list):
-    if not LINE_CHANNEL_ACCESS_TOKEN:
-        return
-    url = "https://api.line.me/v2/bot/message/reply"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-    }
-    try:
-        r = requests.post(url, json={
-            "replyToken": reply_token,
-            "messages": messages[:5],
-        }, headers=headers, timeout=10)
-        if r.status_code != 200:
-            log.warning(f"LINE reply 失敗: {r.text}")
-    except Exception as e:
-        log.error(f"LINE reply 錯誤: {e}")
-
-
-def send_line_push(user_id: str, messages: list):
-    if not LINE_CHANNEL_ACCESS_TOKEN:
-        return
-    url = "https://api.line.me/v2/bot/message/push"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
-    }
-    try:
-        requests.post(url, json={
-            "to": user_id,
-            "messages": messages[:5],
-        }, headers=headers, timeout=10)
-    except Exception:
-        pass
-
-
-def get_line_display_name(user_id: str) -> str:
-    """透過 API 取得 LINE 使用者名稱"""
-    if not LINE_CHANNEL_ACCESS_TOKEN:
-        return "LINE用戶"
-    try:
-        r = requests.get(
-            f"https://api.line.me/v2/bot/profile/{user_id}",
-            headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"},
-            timeout=5,
-        )
-        if r.status_code == 200:
-            return r.json().get("displayName", "LINE用戶")
-    except Exception:
-        pass
-    return "LINE用戶"
-
-
 def notify_admin(text: str):
     if ADMIN_TG_CHAT_ID:
         send_telegram(ADMIN_TG_CHAT_ID, text)
@@ -365,14 +457,11 @@ def notify_admin_new_user(user_id: str, user_data: dict):
         log.warning("⚠️ ADMIN_TELEGRAM_CHAT_ID 未設定，無法通知管理員")
         return
 
-    provider = user_data.get("provider", "unknown")
-    provider_icons = {"telegram": "📨 Telegram", "line": "💚 LINE"}
-
     text = "\n".join([
         "🆕 <b>新用戶註冊申請</b>",
         "",
         f"👤 姓名：<b>{user_data.get('name', '未知')}</b>",
-        f"📡 來源：{provider_icons.get(provider, provider)}",
+        f"📡 來源：📨 Telegram",
         f"🔖 帳號：{user_data.get('username') or user_data.get('provider_id', '-')}",
         f"🆔 ID：<code>{user_id}</code>",
         f"🕐 時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -436,15 +525,15 @@ def handle_admin_callback(data: dict):
         )
 
     # 通知用戶
-    provider = user.get("provider", "")
     if action == "approve":
         notify_text = (
             "🎉 <b>帳號已通過審核！</b>\n\n"
             "您現在可以使用所有功能了：\n"
             "📌 /settings — 查看設定\n"
+            "📌 /timetable — 查詢時刻表\n"
             "📌 /book — 開始訂票\n"
             "📌 /help — 所有指令\n\n"
-            "開始設定訂票吧！🚀"
+            "開始使用吧！🚀"
         )
     else:
         notify_text = (
@@ -453,13 +542,8 @@ def handle_admin_callback(data: dict):
             "如有疑問，請聯繫管理者。"
         )
 
-    if provider == "telegram" and user.get("telegram_chat_id"):
+    if user.get("telegram_chat_id"):
         send_telegram(user["telegram_chat_id"], notify_text)
-    elif provider == "line" and user.get("line_user_id"):
-        send_line_push(user["line_user_id"], [{
-            "type": "text",
-            "text": strip_html(notify_text),
-        }])
 
     log.info(f"🔐 Admin {'approved' if action == 'approve' else 'rejected'} user {user.get('name')} ({user_id})")
 
@@ -505,12 +589,17 @@ def get_config_summary() -> str:
 
 def get_help_text() -> str:
     return "\n".join([
-        "📖 <b>THSRC Sniper 指令一覽</b>",
+        "📖 <b>AutoTHSR 指令一覽</b>",
         "",
-        "🔧 <b>設定</b>",
+        "🔍 <b>時刻表查詢</b>",
+        "/timetable &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; [時間]",
+        "  範例: /timetable 台北 左營 2026/04/10 08:00",
+        "  範例: /timetable 南港 台中 2026/04/10",
+        "",
+        "🔧 <b>訂票設定</b>",
         "/from &lt;站名&gt; — 出發站",
         "/to &lt;站名&gt; — 到達站",
-        "/date &lt;日期&gt; — 日期（2025/06/01）",
+        "/date &lt;日期&gt; — 日期（2026/04/10）",
         "/time &lt;時間&gt; — 時間（07:30）",
         "/count &lt;人數&gt; — 成人票數",
         "/seat &lt;偏好&gt; — 座位偏好",
@@ -545,6 +634,8 @@ def process_command(cmd: str, args: str) -> str:
             r = s["last_result"]
             return f"📋 上次訂票結果：{'✅ 成功' if r.get('success') else '❌ 失敗'}\n時間：{s['last_run']}"
         return "📋 尚未執行過訂票\n輸入 /settings 查看設定\n輸入 /book 開始訂票"
+    elif cmd == "timetable":
+        return handle_timetable_command(args)
     elif cmd == "from":
         if args in STATION_MAP:
             booking_config["from_station"] = args
@@ -627,6 +718,51 @@ def process_command(cmd: str, args: str) -> str:
         return f"❓ 未知指令 <code>/{cmd}</code>\n輸入 /help 查看所有指令"
 
 
+def handle_timetable_command(args: str) -> str:
+    """
+    處理 /timetable 指令
+    格式: /timetable <出發站> <到達站> <日期> [時間]
+    範例: /timetable 台北 左營 2026/04/10 08:00
+    """
+    if not args.strip():
+        return "\n".join([
+            "🔍 <b>時刻表查詢用法</b>",
+            "",
+            "<code>/timetable 出發站 到達站 日期 [時間]</code>",
+            "",
+            "📝 <b>範例：</b>",
+            "<code>/timetable 台北 左營 2026/04/10 08:00</code>",
+            "<code>/timetable 南港 台中 2026/04/10</code>",
+            "",
+            "💡 時間可省略，預設為當前時間",
+            f"🚉 可用車站：{' '.join(STATION_NAMES)}",
+        ])
+
+    parts = args.strip().split()
+
+    if len(parts) < 3:
+        return "❌ 格式錯誤\n用法: /timetable <出發站> <到達站> <日期> [時間]"
+
+    from_st = parts[0]
+    to_st = parts[1]
+    date = parts[2].replace("-", "/")
+    time_str = parts[3] if len(parts) >= 4 else ""
+
+    # 驗證站名
+    if from_st not in STATION_MAP:
+        return f"❌ 無效出發站「{from_st}」\n🚉 {' '.join(STATION_NAMES)}"
+    if to_st not in STATION_MAP:
+        return f"❌ 無效到達站「{to_st}」\n🚉 {' '.join(STATION_NAMES)}"
+
+    # 驗證日期格式
+    try:
+        datetime.strptime(date, "%Y/%m/%d")
+    except ValueError:
+        return "❌ 日期格式錯誤，請使用 YYYY/MM/DD（例: 2026/04/10）"
+
+    return query_thsr_timetable(from_st, to_st, date, time_str)
+
+
 def start_booking() -> str:
     c = booking_config
     missing = []
@@ -693,10 +829,6 @@ def simulate_booking():
     }
 
 
-def strip_html(text: str) -> str:
-    return re.sub(r"<[^>]+>", "", text).replace("&lt;", "<").replace("&gt;", ">")
-
-
 # ═══════════════════════════════════════════════════════════
 #  Telegram Webhook
 # ═══════════════════════════════════════════════════════════
@@ -734,11 +866,11 @@ def telegram_webhook():
 
     # /start → 處理註冊
     if cmd == "start":
-        status, user_id = register_user("telegram", chat_id, name, username)
+        status, user_id = register_user(chat_id, name, username)
 
         if status == "new":
             send_telegram(chat_id, "\n".join([
-                f"👋 嗨 <b>{name}</b>！歡迎使用 <b>THSRC Sniper</b>",
+                f"👋 嗨 <b>{name}</b>！歡迎使用 <b>AutoTHSR</b> 🚅",
                 "",
                 "📝 您的帳號已建立，目前狀態：<b>⏳ 待審核</b>",
                 "",
@@ -799,178 +931,6 @@ def telegram_webhook():
 
 
 # ═══════════════════════════════════════════════════════════
-#  LINE Webhook
-# ═══════════════════════════════════════════════════════════
-
-def verify_line_signature(body: str, signature: str) -> bool:
-    if not LINE_CHANNEL_SECRET:
-        return True
-    h = hmac.new(
-        LINE_CHANNEL_SECRET.encode("utf-8"),
-        body.encode("utf-8"),
-        hashlib.sha256,
-    ).digest()
-    return base64.b64encode(h).decode("utf-8") == signature
-
-
-@app.route("/api/webhook/line", methods=["POST"])
-def line_webhook():
-    touch_session()
-
-    raw_body = request.get_data(as_text=True)
-    signature = request.headers.get("x-line-signature", "")
-
-    if LINE_CHANNEL_SECRET and not verify_line_signature(raw_body, signature):
-        log.warning("⚠️ LINE webhook 簽名驗證失敗")
-        return jsonify({"error": "Invalid signature"}), 403
-
-    body = request.get_json(silent=True) or {}
-    events = body.get("events", [])
-
-    for event in events:
-        if event.get("type") == "follow":
-            # 用戶加入好友 → 自動註冊
-            user_id = event.get("source", {}).get("userId", "")
-            if user_id:
-                handle_line_follow(user_id, event.get("replyToken", ""))
-            continue
-
-        if event.get("type") != "message":
-            continue
-        if event.get("message", {}).get("type") != "text":
-            continue
-
-        reply_token = event.get("replyToken", "")
-        text = event["message"]["text"].strip()
-        source = event.get("source", {})
-        user_id = source.get("userId", "")
-
-        log.info(f"💚 LINE {user_id}: {text}")
-
-        # 處理 LINE 訊息（含認證檢查）
-        handle_line_message(user_id, text, reply_token)
-
-    return jsonify({"ok": True})
-
-
-def handle_line_follow(line_user_id: str, reply_token: str):
-    """LINE 加好友事件 → 自動註冊"""
-    name = get_line_display_name(line_user_id)
-    status, user_id = register_user("line", line_user_id, name)
-
-    if status == "new":
-        send_line_reply(reply_token, [{"type": "text", "text": "\n".join([
-            f"👋 嗨 {name}！歡迎使用 THSRC Sniper 🚅",
-            "",
-            "📝 您的帳號已建立，目前狀態：⏳ 待審核",
-            "",
-            "管理者會收到通知，審核通過後您將收到訊息 📩",
-            "",
-            "輸入「幫助」預覽可用指令",
-        ])}])
-    elif status == "approved":
-        send_line_reply(reply_token, [{"type": "text", "text": "\n".join([
-            f"✅ {name}，歡迎回來！",
-            "輸入「幫助」查看所有指令",
-        ])}])
-
-
-def handle_line_message(line_user_id: str, text: str, reply_token: str):
-    """處理 LINE 訊息"""
-
-    # 中文指令對照
-    zh_cmd_map = {
-        "幫助": "help", "說明": "help",
-        "設定": "settings", "查看設定": "settings",
-        "狀態": "status",
-        "訂票": "book", "開始訂票": "book", "搶票": "book",
-        "停止": "stop", "取消": "stop",
-        "車站": "stations", "站別": "stations",
-        "時段": "times", "時間表": "times",
-        "註冊": "start",
-    }
-
-    zh_arg_patterns = [
-        (r"^出發站?\s*(.+)", "from"),
-        (r"^到達站?\s*(.+)", "to"),
-        (r"^目的地?\s*(.+)", "to"),
-        (r"^日期\s*(.+)", "date"),
-        (r"^時間\s*(.+)", "time"),
-        (r"^人數\s*(.+)", "count"),
-        (r"^座位\s*(.+)", "seat"),
-        (r"^身分證\s*(.+)", "id"),
-        (r"^手機\s*(.+)", "phone"),
-    ]
-
-    # 解析指令
-    cmd, args = None, ""
-
-    cmd_match = re.match(r"^/(\w+)\s*(.*)", text, re.DOTALL)
-    if cmd_match:
-        cmd = cmd_match.group(1).lower()
-        args = cmd_match.group(2).strip()
-    else:
-        for zh, en in zh_cmd_map.items():
-            if text == zh:
-                cmd = en
-                break
-
-        if not cmd:
-            for pattern, en_cmd in zh_arg_patterns:
-                m = re.match(pattern, text)
-                if m:
-                    cmd = en_cmd
-                    args = m.group(1).strip()
-                    break
-
-    if not cmd:
-        send_line_reply(reply_token, [{"type": "text", "text": "💡 我是 THSRC Sniper 🚅\n請輸入「幫助」或 /help 查看指令"}])
-        return
-
-    # /start / 註冊 → 處理註冊
-    if cmd == "start":
-        name = get_line_display_name(line_user_id)
-        status, user_id = register_user("line", line_user_id, name)
-
-        if status == "new":
-            msg = f"👋 嗨 {name}！您的帳號已建立\n\n目前狀態：⏳ 待審核\n管理者會盡快審核 📩"
-        elif status == "pending":
-            msg = f"⏳ {name}，您的帳號正在審核中\n通過後您會收到通知 📩"
-        elif status == "approved":
-            msg = f"✅ {name}，您已通過審核！\n輸入「幫助」查看指令"
-        else:
-            msg = "⚠️ 您的帳號未通過審核，請聯繫管理者。"
-
-        send_line_reply(reply_token, [{"type": "text", "text": msg}])
-        return
-
-    # 開放指令
-    if cmd in OPEN_COMMANDS:
-        reply_text = process_command(cmd, args)
-        send_line_reply(reply_token, [{"type": "text", "text": strip_html(reply_text)}])
-        return
-
-    # 需要認證的指令
-    db_user_id = f"line_{line_user_id}"
-    user = get_user(db_user_id)
-
-    if not user:
-        send_line_reply(reply_token, [{"type": "text", "text": "❌ 尚未註冊\n請輸入「註冊」來建立帳號"}])
-        return
-
-    if user.get("status") == "pending":
-        send_line_reply(reply_token, [{"type": "text", "text": "⏳ 帳號審核中，通過後即可使用"}])
-        return
-
-    if user.get("status") != "approved":
-        send_line_reply(reply_token, [{"type": "text", "text": f"⚠️ 帳號狀態：{user.get('status', '未知')}"}])
-        return
-
-    reply_text = process_command(cmd, args)
-    send_line_reply(reply_token, [{"type": "text", "text": strip_html(reply_text)}])
-
-
-# ═══════════════════════════════════════════════════════════
 #  Health & API Routes
 # ═══════════════════════════════════════════════════════════
 
@@ -981,10 +941,9 @@ def health():
 
     return jsonify({
         "status": "ok",
-        "service": "THSRC Sniper",
+        "service": "AutoTHSR (ATO)",
         "timestamp": datetime.now().isoformat(),
         "telegram_bot": bool(TG_TOKEN),
-        "line_bot": bool(LINE_CHANNEL_ACCESS_TOKEN),
         "session": {
             "active": is_session_alive(),
             "remaining_minutes": round(session_remaining / 60, 1),
@@ -1001,14 +960,13 @@ def health():
 @app.route("/", methods=["GET"])
 def index():
     return jsonify({
-        "name": "🚅 THSRC Sniper",
-        "version": "2.0",
-        "description": "高鐵自動訂票 — LINE & Telegram 指令控制 + 管理員審核",
+        "name": "🚅 AutoTHSR (ATO)",
+        "version": "3.0",
+        "description": "高鐵自動訂票 + 時刻表查詢 — Telegram 指令控制 + 管理員審核",
         "session_timeout": "6 小時",
         "endpoints": {
             "health": "/api/health",
             "telegram_webhook": "/api/webhook/telegram",
-            "line_webhook": "/api/webhook/line",
         },
     })
 
@@ -1041,6 +999,7 @@ def set_telegram_commands():
     commands = [
         {"command": "start", "description": "註冊 / 歡迎"},
         {"command": "help", "description": "顯示說明"},
+        {"command": "timetable", "description": "查詢高鐵時刻表"},
         {"command": "settings", "description": "查看設定"},
         {"command": "book", "description": "開始訂票"},
         {"command": "stop", "description": "停止訂票"},
@@ -1065,9 +1024,8 @@ def set_telegram_commands():
 def startup():
     global _keepalive_thread
 
-    log.info("🚅 THSRC Sniper v2.0 啟動中...")
+    log.info("🚅 AutoTHSR (ATO) v3.0 啟動中...")
     log.info(f"  Telegram Bot: {'✅' if TG_TOKEN else '❌'}")
-    log.info(f"  LINE Bot: {'✅' if LINE_CHANNEL_ACCESS_TOKEN else '❌'}")
     log.info(f"  Admin TG Chat: {'✅ ' + ADMIN_TG_CHAT_ID if ADMIN_TG_CHAT_ID else '❌'}")
     log.info(f"  Render URL: {RENDER_EXTERNAL_URL or '(local)'}")
     log.info(f"  Session: {SESSION_TIMEOUT // 3600}h | Keep-alive: {KEEPALIVE_INTERVAL // 60}min")
@@ -1077,10 +1035,6 @@ def startup():
 
     register_telegram_webhook()
     set_telegram_commands()
-
-    if LINE_CHANNEL_ACCESS_TOKEN and RENDER_EXTERNAL_URL:
-        log.info(f"  💚 LINE webhook: {RENDER_EXTERNAL_URL}/api/webhook/line")
-        log.info("  ℹ️ 請到 LINE Developers → Webhook URL 設定上述網址")
 
     # 管理員自動核准
     if ADMIN_TG_CHAT_ID:
@@ -1103,9 +1057,8 @@ def startup():
     log.info("  🏓 Keep-alive 已啟動")
 
     # 通知管理員服務啟動
-    notify_admin("🚅 <b>THSRC Sniper 已啟動</b>\n\n"
+    notify_admin("🚅 <b>AutoTHSR (ATO) 已啟動</b>\n\n"
                  f"Telegram: {'✅' if TG_TOKEN else '❌'}\n"
-                 f"LINE: {'✅' if LINE_CHANNEL_ACCESS_TOKEN else '❌'}\n"
                  f"Session: {SESSION_TIMEOUT // 3600}h\n"
                  f"時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
