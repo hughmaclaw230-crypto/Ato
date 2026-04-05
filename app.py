@@ -677,7 +677,7 @@ def handle_admin_callback(data: dict):
 # ═══════════════════════════════════════════════════════════
 
 # 不需要核准就能用的指令
-OPEN_COMMANDS = {"start", "help", "status", "search"}
+OPEN_COMMANDS = {"start", "help", "status", "search", "selfapprove"}
 
 
 def get_config_summary() -> str:
@@ -737,6 +737,11 @@ def get_help_text() -> str:
         "🔐 <b>管理員指令</b>",
         "/pending — 重發待審核名單",
         "/listusers — 列出所有用戶",
+        "/approve <code>user_id</code> — 核准用戶",
+        "/reject <code>user_id</code> — 拒絕用戶",
+        "",
+        "🆘 <b>緊急指令</b>",
+        "/selfapprove — Super Admin 自我核准",
     ])
 
 
@@ -1038,6 +1043,36 @@ def telegram_webhook():
             })
             log.info(f"🔐 {'👑 Super Admin' if role == ROLE_SUPERADMIN else '管理員'} {chat_id} 已自動核准")
 
+    # /selfapprove → 緊急自我核准（僅 Super Admin 可用）
+    if cmd == "selfapprove":
+        if SUPERADMIN_CHAT_ID and str(chat_id) == str(SUPERADMIN_CHAT_ID):
+            user_id = f"tg_{chat_id}"
+            save_user(user_id, {
+                "provider": "telegram",
+                "provider_id": chat_id,
+                "name": name or "Owner",
+                "username": username,
+                "status": "approved",
+                "role": ROLE_SUPERADMIN,
+                "telegram_chat_id": chat_id,
+                "created_at": datetime.now().isoformat(),
+                "reviewed_at": datetime.now().isoformat(),
+            })
+            log.info(f"👑 Super Admin {chat_id} 透過 /selfapprove 自我核准")
+            send_telegram(chat_id, "\n".join([
+                "👑 <b>Super Admin 已自我核准！</b>",
+                "",
+                f"Chat ID：<code>{chat_id}</code>",
+                "狀態：<b>✅ 已核准</b>",
+                "",
+                "📌 /search — 快速查詢時刻表",
+                "📌 /help — 所有指令",
+                "📌 /pending — 查看待審核用戶",
+            ]))
+        else:
+            send_telegram(chat_id, "❌ 此指令僅限 Super Admin 使用")
+        return jsonify({"ok": True})
+
     # /start → 處理註冊
     if cmd == "start":
         if is_admin_telegram(chat_id):
@@ -1125,6 +1160,29 @@ def telegram_webhook():
             return jsonify({"ok": True})
         if cmd == "listusers":
             handle_listusers_command(chat_id)
+            return jsonify({"ok": True})
+        if cmd == "approve" and args.strip():
+            target_uid = args.strip()
+            if approve_user(target_uid):
+                target_user = get_user(target_uid)
+                send_telegram(chat_id, f"✅ 已核准用戶：<b>{target_user.get('name', target_uid)}</b>")
+                # 通知被核准的用戶
+                if target_user and target_user.get("telegram_chat_id"):
+                    send_telegram(target_user["telegram_chat_id"],
+                        "🎉 <b>帳號已通過審核！</b>\n\n"
+                        "您現在可以使用所有功能了：\n"
+                        "📌 /search — 查詢時刻表\n"
+                        "📌 /help — 所有指令\n\n"
+                        "開始使用吧！🚀")
+            else:
+                send_telegram(chat_id, f"❌ 找不到用戶 <code>{target_uid}</code>\n💡 用 /listusers 查看所有用戶 ID")
+            return jsonify({"ok": True})
+        if cmd == "reject" and args.strip():
+            target_uid = args.strip()
+            if reject_user(target_uid):
+                send_telegram(chat_id, f"❌ 已拒絕用戶：<code>{target_uid}</code>")
+            else:
+                send_telegram(chat_id, f"❌ 找不到用戶 <code>{target_uid}</code>")
             return jsonify({"ok": True})
 
         reply_text = process_command(cmd, args)
@@ -1244,6 +1302,9 @@ def set_telegram_commands():
         {"command": "stations", "description": "車站列表"},
         {"command": "pending", "description": "🔐 待審核名單（管理員）"},
         {"command": "listusers", "description": "🔐 所有用戶（管理員）"},
+        {"command": "approve", "description": "🔐 核准用戶（管理員）"},
+        {"command": "reject", "description": "🔐 拒絕用戶（管理員）"},
+        {"command": "selfapprove", "description": "🆘 Super Admin 自我核准"},
     ]
     url = f"https://api.telegram.org/bot{TG_TOKEN}/setMyCommands"
     try:
@@ -1273,22 +1334,35 @@ def startup():
     register_telegram_webhook()
     set_telegram_commands()
 
-    # Super Admin 自動建立（最高權限）
-    sa_id = f"tg_{SUPERADMIN_CHAT_ID}"
-    sa_user = get_user(sa_id)
-    if not sa_user or sa_user.get("role") != ROLE_SUPERADMIN:
-        save_user(sa_id, {
-            "provider": "telegram",
-            "provider_id": SUPERADMIN_CHAT_ID,
-            "name": "Owner",
-            "username": "",
-            "status": "approved",
-            "role": ROLE_SUPERADMIN,
-            "telegram_chat_id": SUPERADMIN_CHAT_ID,
-            "created_at": datetime.now().isoformat(),
-            "reviewed_at": datetime.now().isoformat(),
-        })
-        log.info("  👑 Super Admin 帳號已自動建立")
+    # Super Admin 自動建立/修復（最高權限，強制核准）
+    if SUPERADMIN_CHAT_ID:
+        sa_id = f"tg_{SUPERADMIN_CHAT_ID}"
+        sa_user = get_user(sa_id)
+        needs_update = (
+            not sa_user
+            or sa_user.get("role") != ROLE_SUPERADMIN
+            or sa_user.get("status") != "approved"
+        )
+        if needs_update:
+            # 保留原有姓名（如果有的話）
+            existing_name = sa_user.get("name", "Owner") if sa_user else "Owner"
+            existing_username = sa_user.get("username", "") if sa_user else ""
+            save_user(sa_id, {
+                "provider": "telegram",
+                "provider_id": SUPERADMIN_CHAT_ID,
+                "name": existing_name,
+                "username": existing_username,
+                "status": "approved",
+                "role": ROLE_SUPERADMIN,
+                "telegram_chat_id": SUPERADMIN_CHAT_ID,
+                "created_at": sa_user.get("created_at", datetime.now().isoformat()) if sa_user else datetime.now().isoformat(),
+                "reviewed_at": datetime.now().isoformat(),
+            })
+            log.info(f"  👑 Super Admin 帳號已{'修復' if sa_user else '建立'}並強制核准")
+        else:
+            log.info("  👑 Super Admin 帳號已存在且已核准")
+    else:
+        log.warning("  ⚠️ SUPERADMIN_CHAT_ID 未設定，無法建立 Super Admin")
 
     # 環境變數指定的管理員（如有設定且不是 Super Admin）
     if ADMIN_TG_CHAT_ID and ADMIN_TG_CHAT_ID != SUPERADMIN_CHAT_ID:
