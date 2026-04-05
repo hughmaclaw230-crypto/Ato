@@ -1,6 +1,6 @@
 #!/bin/bash
 # Startup script: run Flask initialization then start gunicorn
-echo "🚅 THSRC Sniper — Starting..."
+echo "🚅 ATO — Starting..."
 
 # Use gunicorn with preload to trigger startup()
 exec gunicorn \

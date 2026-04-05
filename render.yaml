@@ -1,5 +1,5 @@
-# Render 部署設定檔 — AutoTHSR (ATO) v3.0
-# Telegram 指令控制 + 高鐵時刻表查詢 + 6 小時保活
+# Render 部署設定檔 — ATO (AutoTHSR) v3.1
+# Telegram Bot 指令控制 + 高鐵時刻表查詢 + Firestore 持久化
 
 services:
   - type: web               # Web Service（接收 Webhook）

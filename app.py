@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-AutoTHSR (ATO) — Flask Web Service
+ATO (AutoTHSR) — Flask Web Service
 Telegram Bot 指令控制 + 用戶認證 + 管理員審核 + 高鐵時刻表查詢
-6 小時保活，收到訊息自動重置計時
+Firestore 雲端持久化 + 6 小時保活
 """
 
 import os
@@ -1092,7 +1092,7 @@ def telegram_webhook():
 
         if status == "new":
             send_telegram(chat_id, "\n".join([
-                f"👋 嗨 <b>{name}</b>！歡迎使用 <b>AutoTHSR</b> 🚅",
+                f"👋 嗨 <b>{name}</b>！歡迎使用 <b>ATO</b> 🚅",
                 "",
                 "📝 您的帳號已建立，目前狀態：<b>⏳ 待審核</b>",
                 "",
@@ -1234,7 +1234,7 @@ def health():
 
     return jsonify({
         "status": "ok",
-        "service": "AutoTHSR (ATO)",
+        "service": "ATO",
         "timestamp": datetime.now().isoformat(),
         "telegram_bot": bool(TG_TOKEN),
         "firestore": firestore_ok,
@@ -1254,9 +1254,9 @@ def health():
 @app.route("/", methods=["GET"])
 def index():
     return jsonify({
-        "name": "🚅 AutoTHSR (ATO)",
+        "name": "🚅 ATO",
         "version": "3.1",
-        "description": "高鐵自動訂票 + 時刻表查詢 — Telegram 指令控制 + Firestore 持久化",
+        "description": "高鐵自動訂票 + 時刻表查詢 — Telegram Bot + Firestore 持久化",
         "session_timeout": "6 小時",
         "endpoints": {
             "health": "/api/health",
@@ -1317,7 +1317,7 @@ def set_telegram_commands():
 def startup():
     global _keepalive_thread
 
-    log.info("🚅 AutoTHSR (ATO) v3.0 啟動中...")
+    log.info("🚅 ATO v3.1 啟動中...")
     log.info(f"  Telegram Bot: {'✅' if TG_TOKEN else '❌'}")
     log.info(f"  Admin TG Chat: {'✅ ' + ADMIN_TG_CHAT_ID if ADMIN_TG_CHAT_ID else '❌'}")
     log.info(f"  Render URL: {RENDER_EXTERNAL_URL or '(local)'}")
@@ -1388,7 +1388,7 @@ def startup():
     # 通知管理員服務啟動
     pending_count = len(get_pending_users())
     pending_info = f"\n⏳ 待審核用戶：{pending_count} 人" if pending_count > 0 else ""
-    notify_admin("🚅 <b>AutoTHSR (ATO) 已啟動</b>\n\n"
+    notify_admin("🚅 <b>ATO 已啟動</b>\n\n"
                  f"Telegram: {'✅' if TG_TOKEN else '❌'}\n"
                  f"Session: {SESSION_TIMEOUT // 3600}h\n"
                  f"時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
