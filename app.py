@@ -555,10 +555,92 @@ def notify_admin_new_user(user_id: str, user_data: dict):
         send_telegram(target_id, text, reply_markup=buttons)
 
 
+def get_pending_users() -> list[tuple[str, dict]]:
+    """取得所有待審核的用戶"""
+    with _users_lock:
+        users = _load_users()
+    return [
+        (uid, udata) for uid, udata in users.items()
+        if udata.get("status") == "pending"
+    ]
+
+
+def get_all_users() -> list[tuple[str, dict]]:
+    """取得所有用戶"""
+    with _users_lock:
+        users = _load_users()
+    return list(users.items())
+
+
+def notify_pending_users_to_admin():
+    """將所有待審核用戶重新推播給管理員（含核准/拒絕按鈕）"""
+    pending = get_pending_users()
+    if not pending:
+        return 0
+
+    for user_id, user_data in pending:
+        notify_admin_new_user(user_id, user_data)
+
+    log.info(f"📋 已重新推播 {len(pending)} 位待審核用戶給管理員")
+    return len(pending)
+
+
+def handle_pending_command(chat_id: str):
+    """管理員指令：/pending — 查看並重新推播待審核名單"""
+    pending = get_pending_users()
+    if not pending:
+        send_telegram(chat_id, "✅ 目前沒有待審核的用戶")
+        return
+
+    send_telegram(chat_id, f"📋 共 {len(pending)} 位待審核用戶，正在重新發送審核通知...")
+
+    for user_id, user_data in pending:
+        notify_admin_new_user(user_id, user_data)
+
+    send_telegram(chat_id, f"✅ 已重新發送 {len(pending)} 筆審核通知，請查看上方按鈕")
+
+
+def handle_listusers_command(chat_id: str):
+    """管理員指令：/listusers — 列出所有用戶"""
+    all_users = get_all_users()
+    if not all_users:
+        send_telegram(chat_id, "📋 目前沒有任何用戶")
+        return
+
+    status_emoji = {
+        "approved": "✅",
+        "pending": "⏳",
+        "rejected": "❌",
+    }
+    role_emoji = {
+        ROLE_SUPERADMIN: "👑",
+        ROLE_ADMIN: "🔧",
+        ROLE_USER: "👤",
+    }
+
+    lines = [f"📋 <b>用戶列表</b>（共 {len(all_users)} 人）", ""]
+
+    for uid, udata in all_users:
+        s = status_emoji.get(udata.get('status', ''), '❓')
+        r = role_emoji.get(udata.get('role', ''), '👤')
+        name = udata.get('name', '未知')
+        status = udata.get('status', '未知')
+        lines.append(f"{r}{s} <b>{name}</b> — {status}")
+        lines.append(f"     🆔 <code>{uid}</code>")
+
+    send_telegram(chat_id, "\n".join(lines))
+
+
 def handle_admin_callback(data: dict):
     """處理管理員按下核准/拒絕按鈕"""
     cb = data.get("callback_query")
     if not cb or not cb.get("data"):
+        return
+
+    cb_data_str = cb.get("data", "")
+
+    # 只處理 approve: 和 reject: 開頭的回調
+    if not cb_data_str.startswith("approve:") and not cb_data_str.startswith("reject:"):
         return
 
     from_id = str(cb["from"]["id"])
@@ -566,11 +648,22 @@ def handle_admin_callback(data: dict):
         answer_callback(cb["id"], "⚠️ 只有管理者可以執行此操作")
         return
 
-    action, user_id = cb["data"].split(":", 1)
+    action, user_id = cb_data_str.split(":", 1)
     user = get_user(user_id)
 
     if not user:
         answer_callback(cb["id"], "❌ 找不到此用戶")
+        return
+
+    if user.get("status") != "pending":
+        answer_callback(cb["id"], f"⚠️ 此用戶狀態已是：{user.get('status')}")
+        # Still update the message
+        if cb.get("message"):
+            edit_telegram_message(
+                str(cb["message"]["chat"]["id"]),
+                cb["message"]["message_id"],
+                f"ℹ️ 用戶 <b>{user.get('name', '未知')}</b> 已處理過（{user.get('status')}）",
+            )
         return
 
     if action == "approve":
@@ -685,6 +778,10 @@ def get_help_text() -> str:
         "",
         "📊 <b>其他</b>",
         "/stations — 車站列表 | /help — 本說明",
+        "",
+        "🔐 <b>管理員指令</b>",
+        "/pending — 重發待審核名單",
+        "/listusers — 列出所有用戶",
     ])
 
 
@@ -941,7 +1038,12 @@ def telegram_webhook():
                 edit_telegram_message(cb_chat_id, cb["message"]["message_id"], text)
             return jsonify({"ok": True})
 
-        handle_admin_callback(data)
+        if cb_data.startswith("approve:") or cb_data.startswith("reject:"):
+            handle_admin_callback(data)
+            return jsonify({"ok": True})
+
+        # 未知 callback — 回應但不做處理
+        answer_callback(cb.get("id", ""), "⚠️ 未知操作")
         return jsonify({"ok": True})
 
     message = data.get("message")
@@ -1061,8 +1163,15 @@ def telegram_webhook():
 
         return jsonify({"ok": True})
 
-    # 管理員可以直接使用所有指令
+    # 管理員專用指令
     if is_admin_telegram(chat_id):
+        if cmd == "pending":
+            handle_pending_command(chat_id)
+            return jsonify({"ok": True})
+        if cmd == "listusers":
+            handle_listusers_command(chat_id)
+            return jsonify({"ok": True})
+
         reply_text = process_command(cmd, args)
         send_telegram(chat_id, reply_text)
         return jsonify({"ok": True})
@@ -1170,6 +1279,8 @@ def set_telegram_commands():
         {"command": "stop", "description": "停止訂票"},
         {"command": "status", "description": "訂票狀態"},
         {"command": "stations", "description": "車站列表"},
+        {"command": "pending", "description": "🔐 待審核名單（管理員）"},
+        {"command": "listusers", "description": "🔐 所有用戶（管理員）"},
     ]
     url = f"https://api.telegram.org/bot{TG_TOKEN}/setMyCommands"
     try:
@@ -1233,10 +1344,18 @@ def startup():
     log.info("  🏓 Keep-alive 已啟動")
 
     # 通知管理員服務啟動
+    pending_count = len(get_pending_users())
+    pending_info = f"\n⏳ 待審核用戶：{pending_count} 人" if pending_count > 0 else ""
     notify_admin("🚅 <b>AutoTHSR (ATO) 已啟動</b>\n\n"
                  f"Telegram: {'✅' if TG_TOKEN else '❌'}\n"
                  f"Session: {SESSION_TIMEOUT // 3600}h\n"
-                 f"時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                 f"時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                 f"{pending_info}")
+
+    # 啟動時自動重新推播待審核用戶
+    if pending_count > 0:
+        log.info(f"📋 發現 {pending_count} 位待審核用戶，重新推播審核通知...")
+        notify_pending_users_to_admin()
 
 
 # ═══════════════════════════════════════════════════════════
