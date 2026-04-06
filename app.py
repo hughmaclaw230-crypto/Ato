@@ -520,18 +520,29 @@ def handle_train_booking_callback(cb: dict, cb_data: str, chat_id: str):
     has_phone = bool(c.get("phone"))
 
     if has_id and has_phone:
-        # 個人資料已齊全 → 直接顯示確認畫面
+        # 個人資料已齊全 → 詢問搜尋設定
         set_pending_booking(chat_id, {
             "from_station": from_st,
             "to_station": to_st,
             "date": date,
             "time": depart_time,
             "train_no": train_no,
-            "step": "confirm",
+            "step": "ask_interval",
             "id_number": c["id_number"],
             "phone": c["phone"],
         })
-        _send_booking_confirm(chat_id, from_st, to_st, date, depart_time, train_no)
+        send_telegram(chat_id, "\n".join([
+            f"🎫 <b>訂票準備 — 車次 {train_no}</b>",
+            f"",
+            f"🚉 {from_st} → {to_st}",
+            f"📅 {date}　🕐 {depart_time}",
+            f"─────────────────",
+            f"",
+            f"⏱ 請問<b>每隔幾秒搜尋一次</b>？",
+            f"",
+            f"💡 請輸入秒數（建議 3-30 秒）",
+            f"❌ 輸入 /cancel 取消",
+        ]))
     else:
         # 需要個人資料 → 開始詢問
         set_pending_booking(chat_id, {
@@ -565,6 +576,10 @@ def _send_booking_confirm(chat_id: str, from_st: str, to_st: str,
     id_masked = pb["id_number"][:3] + "***" + pb["id_number"][-2:] if len(pb.get("id_number", "")) >= 5 else "✅"
     phone_masked = pb["phone"][:4] + "***" + pb["phone"][-2:] if len(pb.get("phone", "")) >= 6 else "✅"
 
+    search_interval = pb.get("search_interval", booking_config["retry_interval"])
+    search_hours = pb.get("search_hours", 1)
+    max_retries = int((search_hours * 3600) / search_interval)
+
     text = "\n".join([
         f"🎫 <b>訂票確認</b>",
         f"",
@@ -577,7 +592,9 @@ def _send_booking_confirm(chat_id: str, from_st: str, to_st: str,
         f"─────────────────",
         f"🆔 身分證：{id_masked}",
         f"📱 手機：{phone_masked}",
-        f"🔄 最多重試：{booking_config['max_retries']} 次",
+        f"⏱ 搜尋間隔：<b>每 {search_interval} 秒</b>",
+        f"⏳ 搜尋時長：<b>{search_hours} 小時</b>",
+        f"🔄 預估搜尋次數：<b>{max_retries} 次</b>",
         f"",
         f"確認開始訂票？",
     ])
@@ -626,6 +643,11 @@ def handle_booking_confirm_callback(cb: dict, cb_data: str, chat_id: str):
             send_telegram(chat_id, "⚠️ 訂票資料已過期，請重新搜尋 /search")
             return
 
+        # 從用戶設定計算 max_retries
+        search_interval = pb.get("search_interval", booking_config["retry_interval"])
+        search_hours = pb.get("search_hours", 1)
+        max_retries = int((search_hours * 3600) / search_interval)
+
         # 更新 booking_config
         booking_config["from_station"] = pb["from_station"]
         booking_config["to_station"] = pb["to_station"]
@@ -633,6 +655,8 @@ def handle_booking_confirm_callback(cb: dict, cb_data: str, chat_id: str):
         booking_config["travel_time"] = pb["time"]
         booking_config["id_number"] = pb["id_number"]
         booking_config["phone"] = pb["phone"]
+        booking_config["retry_interval"] = search_interval
+        booking_config["max_retries"] = max_retries
 
         clear_pending_booking(chat_id)
 
@@ -642,7 +666,8 @@ def handle_booking_confirm_callback(cb: dict, cb_data: str, chat_id: str):
                 f"🚀 <b>訂票已啟動！</b>\n\n"
                 f"🚅 車次 {pb['train_no']}\n"
                 f"🚉 {pb['from_station']} → {pb['to_station']}\n"
-                f"📅 {pb['date']}　🕐 {pb['time']}")
+                f"📅 {pb['date']}　🕐 {pb['time']}\n"
+                f"⏱ 每 {search_interval} 秒搜尋，持續 {search_hours} 小時")
 
         # 啟動訂票
         result = start_booking()
@@ -707,10 +732,77 @@ def handle_pending_booking_input(chat_id: str, text: str) -> bool:
             return True
 
         pb["phone"] = phone
+        pb["step"] = "ask_interval"
+        set_pending_booking(chat_id, pb)
+
+        send_telegram(chat_id, "\n".join([
+            f"✅ 手機號碼已記錄",
+            f"",
+            f"⏱ 請問<b>每隔幾秒搜尋一次</b>？",
+            f"",
+            f"💡 請輸入秒數（建議 3-30 秒）",
+            f"❌ 輸入 /cancel 取消",
+        ]))
+        return True
+
+    if step == "ask_interval":
+        try:
+            interval = float(text.strip())
+        except ValueError:
+            send_telegram(chat_id, "❌ 請輸入數字（例：5）")
+            return True
+
+        if interval < 1 or interval > 60:
+            send_telegram(chat_id, "\n".join([
+                "❌ 秒數需在 1-60 之間",
+                "",
+                "💡 建議 3-30 秒",
+                "請重新輸入，或 /cancel 取消",
+            ]))
+            return True
+
+        pb["search_interval"] = interval
+        pb["step"] = "ask_hours"
+        set_pending_booking(chat_id, pb)
+
+        send_telegram(chat_id, "\n".join([
+            f"✅ 搜尋間隔：每 {interval} 秒",
+            f"",
+            f"⏳ 請問要<b>搜尋幾小時</b>？",
+            f"",
+            f"💡 請輸入時數（最多 12 小時）",
+            f"📝 例：1（1小時）、0.5（30分鐘）、6",
+            f"❌ 輸入 /cancel 取消",
+        ]))
+        return True
+
+    if step == "ask_hours":
+        try:
+            hours = float(text.strip())
+        except ValueError:
+            send_telegram(chat_id, "❌ 請輸入數字（例：2）")
+            return True
+
+        if hours <= 0 or hours > 12:
+            send_telegram(chat_id, "\n".join([
+                "❌ 搜尋時數需在 0.1-12 之間",
+                "",
+                "💡 最多 12 小時",
+                "📝 例：1、0.5、6、12",
+                "請重新輸入，或 /cancel 取消",
+            ]))
+            return True
+
+        pb["search_hours"] = hours
         pb["step"] = "confirm"
         set_pending_booking(chat_id, pb)
 
-        # 個人資料收集完畢 → 顯示確認畫面
+        interval = pb.get("search_interval", 3)
+        max_retries = int((hours * 3600) / interval)
+
+        send_telegram(chat_id, f"✅ 搜尋設定：每 {interval} 秒，持續 {hours} 小時（約 {max_retries} 次）")
+
+        # 搜尋設定完成 → 顯示確認畫面
         _send_booking_confirm(
             chat_id,
             pb["from_station"], pb["to_station"],
@@ -1011,7 +1103,8 @@ def get_config_summary() -> str:
         f"💺 座位：{c['seat_type']}",
         f"🆔 身分證：{'✅ 已設定' if c['id_number'] else '❌ 未設定'}",
         f"📱 手機：{'✅ 已設定' if c['phone'] else '❌ 未設定'}",
-        f"🔄 重試：最多 {c['max_retries']} 次，間隔 {c['retry_interval']}s",
+        f"⏱ 搜尋間隔：每 {c['retry_interval']}s",
+        f"⏳ 搜尋時長：約 {round(c['max_retries'] * c['retry_interval'] / 3600, 1)}h（{c['max_retries']} 次）",
     ]
 
     s = booking_status
@@ -1223,6 +1316,8 @@ def start_booking() -> str:
     booking_status["last_result"] = None
     threading.Thread(target=run_booking_thread, daemon=True).start()
 
+    search_hours = round(c['max_retries'] * c['retry_interval'] / 3600, 1)
+
     return (
         f"🚅 <b>開始訂票！</b>\n"
         f"─────────────────\n"
@@ -1230,7 +1325,7 @@ def start_booking() -> str:
         f"日期：{c['travel_date']}　時間：{c['travel_time']}\n"
         f"人數：{c['adult_count']} 人\n"
         f"─────────────────\n"
-        f"最多 {c['max_retries']} 次，間隔 {c['retry_interval']}s\n"
+        f"⏱ 每 {c['retry_interval']}s 搜尋，持續 {search_hours}h（約 {c['max_retries']} 次）\n"
         f"完成後自動通知 📩"
     )
 
