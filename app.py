@@ -418,10 +418,10 @@ def format_timetable_result(data: dict, from_st: str, to_st: str,
         if extras:
             lines.append(f"     {' | '.join(extras)}")
 
-        # 生成按鈕 callback_data: bk:<from>:<to>:<date>:<depart_time>:<train_no>
+        # 生成按鈕 callback_data: bk|<from>|<to>|<date>|<depart>-<arrive>-<duration>|<train_no>
         if with_buttons and depart != "-":
-            # 用出發時間取代 travel_time（更精確）
-            cb_data = f"bk:{from_st}:{to_st}:{date}:{depart}:{train_no}"
+            time_pack = f"{depart}-{arrive}-{duration}" if arrive and duration else depart
+            cb_data = f"bk|{from_st}|{to_st}|{date}|{time_pack}|{train_no}"
             btn_text = f"🎫 {train_no} — {depart}"
             inline_buttons.append([{"text": btn_text, "callback_data": cb_data}])
 
@@ -442,10 +442,10 @@ def format_timetable_result(data: dict, from_st: str, to_st: str,
         later = _shift_time(time_str, 30)
         if earlier:
             nav_row.append({"text": f"⬅️ 往前 ({earlier})",
-                            "callback_data": f"nav:{from_st}:{to_st}:{date}:{earlier}"})
+                            "callback_data": f"nav|{from_st}|{to_st}|{date}|{earlier}"})
         if later:
             nav_row.append({"text": f"➡️ 往後 ({later})",
-                            "callback_data": f"nav:{from_st}:{to_st}:{date}:{later}"})
+                            "callback_data": f"nav|{from_st}|{to_st}|{date}|{later}"})
         if nav_row:
             if not inline_buttons:
                 inline_buttons = []
@@ -547,63 +547,74 @@ def clear_pending_booking(chat_id: str):
 def handle_train_booking_callback(cb: dict, cb_data: str, chat_id: str):
     """
     處理點選班次按鈕回調
-    cb_data 格式: bk:<from>:<to>:<date>:<time>:<train_no>
+    cb_data 格式: bk|<from>|<to>|<date>|<depart>-<arrive>-<duration>|<train_no>
     """
     answer_callback(cb["id"], "🎫 準備訂票...")
 
-    parts = cb_data.split(":", 5)
+    parts = cb_data.split("|")
     if len(parts) < 6:
         send_telegram(chat_id, "❌ 資料格式錯誤，請重新搜尋")
         return
 
-    _, from_st, to_st, date, depart_time, train_no = parts
+    _, from_st, to_st, date, time_pack, train_no = parts[:6]
+
+    # 解析時間包：depart-arrive-duration
+    time_parts = time_pack.split("-")
+    depart_time = time_parts[0] if len(time_parts) >= 1 else "-"
+    arrive_time = time_parts[1] if len(time_parts) >= 2 else ""
+    duration = time_parts[2] if len(time_parts) >= 3 else ""
+
+    # 班次資訊行
+    train_info_line = f"🚅 {train_no}：{depart_time}→{arrive_time}　⏱{duration}" if arrive_time and duration else f"🚅 {train_no}：{depart_time}"
 
     # 檢查是否已有個人資料
     c = booking_config
     has_id = bool(c.get("id_number"))
     has_phone = bool(c.get("phone"))
 
+    booking_data = {
+        "from_station": from_st,
+        "to_station": to_st,
+        "date": date,
+        "time": depart_time,
+        "arrive_time": arrive_time,
+        "duration": duration,
+        "train_no": train_no,
+    }
+
     if has_id and has_phone:
-        # 個人資料已齊全 → 詢問搜尋設定
-        set_pending_booking(chat_id, {
-            "from_station": from_st,
-            "to_station": to_st,
-            "date": date,
-            "time": depart_time,
-            "train_no": train_no,
+        booking_data.update({
             "step": "ask_interval",
             "id_number": c["id_number"],
             "phone": c["phone"],
         })
+        set_pending_booking(chat_id, booking_data)
         send_telegram(chat_id, "\n".join([
-            f"🎫 <b>訂票準備 — 車次 {train_no}</b>",
+            f"🎫 <b>訂票準備</b>",
             f"",
+            f"{train_info_line}",
             f"🚉 {from_st} → {to_st}",
-            f"📅 {date}　🕐 {depart_time}",
+            f"📅 {date}",
             f"─────────────────",
             f"",
             f"⏱ 請問<b>每隔幾秒搜尋一次</b>？",
             f"",
-            f"💡 請輸入秒數（建議 3-30 秒）",
+            f"💡 請輸入秒數（5-60 秒）",
             f"❌ 輸入 /cancel 取消",
         ]))
     else:
-        # 需要個人資料 → 開始詢問
-        set_pending_booking(chat_id, {
-            "from_station": from_st,
-            "to_station": to_st,
-            "date": date,
-            "time": depart_time,
-            "train_no": train_no,
+        booking_data.update({
             "step": "ask_id",
             "id_number": c.get("id_number", ""),
             "phone": c.get("phone", ""),
         })
+        set_pending_booking(chat_id, booking_data)
         send_telegram(chat_id, "\n".join([
-            f"🎫 <b>訂票準備 — 車次 {train_no}</b>",
+            f"🎫 <b>訂票準備</b>",
             f"",
+            f"{train_info_line}",
             f"🚉 {from_st} → {to_st}",
-            f"📅 {date}　🕐 {depart_time}",
+            f"📅 {date}",
             f"─────────────────",
             f"",
             f"📝 請輸入您的<b>身分證字號</b>：",
@@ -624,13 +635,16 @@ def _send_booking_confirm(chat_id: str, from_st: str, to_st: str,
     search_hours = pb.get("search_hours", 1)
     max_retries = int((search_hours * 3600) / search_interval)
 
+    arrive_time = pb.get("arrive_time", "")
+    duration = pb.get("duration", "")
+    train_line = f"🚅 班次：<b>{train_no}：{time_str}→{arrive_time}　⏱{duration}</b>" if arrive_time and duration else f"🚅 班次：<b>{train_no}：{time_str}</b>"
+
     text = "\n".join([
         f"🎫 <b>訂票確認</b>",
         f"",
-        f"🚅 車次：<b>{train_no}</b>",
+        train_line,
         f"🚉 路線：<b>{from_st} → {to_st}</b>",
         f"📅 日期：<b>{date}</b>",
-        f"🕐 出發：<b>{time_str}</b>",
         f"👤 人數：<b>{booking_config['adult_count']} 人</b>",
         f"💺 座位：<b>{booking_config['seat_type']}</b>",
         f"─────────────────",
@@ -697,6 +711,9 @@ def handle_booking_confirm_callback(cb: dict, cb_data: str, chat_id: str):
         booking_config["to_station"] = pb["to_station"]
         booking_config["travel_date"] = pb["date"]
         booking_config["travel_time"] = pb["time"]
+        booking_config["arrive_time"] = pb.get("arrive_time", "")
+        booking_config["duration"] = pb.get("duration", "")
+        booking_config["train_no"] = pb["train_no"]
         booking_config["id_number"] = pb["id_number"]
         booking_config["phone"] = pb["phone"]
         booking_config["retry_interval"] = search_interval
@@ -704,13 +721,17 @@ def handle_booking_confirm_callback(cb: dict, cb_data: str, chat_id: str):
 
         clear_pending_booking(chat_id)
 
+        arrive = pb.get('arrive_time', '')
+        dur = pb.get('duration', '')
+        train_info = f"{pb['train_no']}：{pb['time']}→{arrive}　⏱{dur}" if arrive and dur else f"{pb['train_no']}：{pb['time']}"
+
         # 更新確認訊息
         if cb.get("message"):
             edit_telegram_message(chat_id, cb["message"]["message_id"],
                 f"🚀 <b>訂票已啟動！</b>\n\n"
-                f"🚅 車次 {pb['train_no']}\n"
+                f"🚅 {train_info}\n"
                 f"🚉 {pb['from_station']} → {pb['to_station']}\n"
-                f"📅 {pb['date']}　🕐 {pb['time']}\n"
+                f"📅 {pb['date']}\n"
                 f"⏱ 每 {search_interval} 秒搜尋，持續 {search_hours} 小時")
 
         # 啟動訂票
@@ -784,7 +805,7 @@ def handle_pending_booking_input(chat_id: str, text: str) -> bool:
             f"",
             f"⏱ 請問<b>每隔幾秒搜尋一次</b>？",
             f"",
-            f"💡 請輸入秒數（建議 3-30 秒）",
+            f"💡 請輸入秒數（5-60 秒）",
             f"❌ 輸入 /cancel 取消",
         ]))
         return True
@@ -796,11 +817,11 @@ def handle_pending_booking_input(chat_id: str, text: str) -> bool:
             send_telegram(chat_id, "❌ 請輸入數字（例：5）")
             return True
 
-        if interval < 1 or interval > 60:
+        if interval < 5 or interval > 60:
             send_telegram(chat_id, "\n".join([
-                "❌ 秒數需在 1-60 之間",
+                "❌ 秒數需在 5-60 之間",
                 "",
-                "💡 建議 3-30 秒",
+                "💡 建議 5-30 秒",
                 "請重新輸入，或 /cancel 取消",
             ]))
             return True
@@ -1389,9 +1410,13 @@ def run_booking_thread():
     c = booking_config
     if result.get("success"):
         booking_id = result.get('訂位代號', '—')
-        train_no = result.get('車次', '—')
-        depart_time = result.get('出發時間', '—')
+        train_no = c.get('train_no', result.get('車次', '—'))
+        depart_time = c.get('travel_time', result.get('出發時間', '—'))
+        arrive_time = c.get('arrive_time', '')
+        duration = c.get('duration', '')
         seat = result.get('座位', '—')
+
+        train_line = f"🚅 班次：<b>{train_no}：{depart_time}→{arrive_time}　⏱{duration}</b>" if arrive_time and duration else f"🚅 班次：<b>{train_no}：{depart_time}</b>"
 
         msg = "\n".join([
             "🎉🎉🎉",
@@ -1401,10 +1426,9 @@ def run_booking_thread():
             "",
             f"🔖 訂位代號：<b><code>{booking_id}</code></b>",
             "",
-            f"🚅 車次：<b>{train_no}</b>",
+            train_line,
             f"🚉 路線：<b>{c['from_station']} → {c['to_station']}</b>",
             f"📅 日期：<b>{c['travel_date']}</b>",
-            f"🕐 出發：<b>{depart_time}</b>",
             f"💺 座位：<b>{seat}</b>",
             f"👤 人數：<b>{c['adult_count']} 人</b>",
             "",
@@ -1488,10 +1512,10 @@ def telegram_webhook():
                 edit_telegram_message(cb_chat_id, cb["message"]["message_id"], text)
             return jsonify({"ok": True})
 
-        if cb_data.startswith("nav:"):
-            # 時間導航回調: nav:<from>:<to>:<date>:<new_time>
+        if cb_data.startswith("nav|"):
+            # 時間導航回調: nav|<from>|<to>|<date>|<new_time>
             answer_callback(cb["id"], "🔍 查詢中...")
-            parts = cb_data.split(":", 4)
+            parts = cb_data.split("|")
             if len(parts) == 5:
                 _, nav_from, nav_to, nav_date, nav_time = parts
                 # 更新原訊息為「查詢中」
@@ -1507,8 +1531,8 @@ def telegram_webhook():
                     send_telegram(cb_chat_id, result_text)
             return jsonify({"ok": True})
 
-        if cb_data.startswith("bk:"):
-            # 班次訂票回調: bk:<from>:<to>:<date>:<time>:<train_no>
+        if cb_data.startswith("bk|"):
+            # 班次訂票回調: bk|<from>|<to>|<date>|<time_pack>|<train_no>
             handle_train_booking_callback(cb, cb_data, cb_chat_id)
             return jsonify({"ok": True})
 
