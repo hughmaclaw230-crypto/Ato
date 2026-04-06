@@ -18,7 +18,7 @@ from telegram_form import (start_search_form, handle_form_callback,
                            get_completed_form, clear_form, parse_smart_search)
 from firestore_db import (
     get_user, save_user, get_pending_users, get_all_users,
-    get_db as get_firestore_db,
+    get_db as get_firestore_db, is_available as is_firestore_available,
 )
 
 # ─── 設定 ───────────────────────────────────────────────
@@ -1317,85 +1317,96 @@ def set_telegram_commands():
 def startup():
     global _keepalive_thread
 
-    log.info("🚅 ATO v3.1 啟動中...")
+    log.info("🚅 ATO v3.2 啟動中...")
     log.info(f"  Telegram Bot: {'✅' if TG_TOKEN else '❌'}")
     log.info(f"  Admin TG Chat: {'✅ ' + ADMIN_TG_CHAT_ID if ADMIN_TG_CHAT_ID else '❌'}")
     log.info(f"  Render URL: {RENDER_EXTERNAL_URL or '(local)'}")
     log.info(f"  Session: {SESSION_TIMEOUT // 3600}h | Keep-alive: {KEEPALIVE_INTERVAL // 60}min")
 
-    # 初始化 Firestore
+    # ── 初始化 Firestore（失敗不會 crash，但後續跳過 DB 操作）──
+    firestore_ok = False
     try:
         get_firestore_db()
-        log.info("  🔥 Firestore 已連線")
+        firestore_ok = is_firestore_available()
+        if firestore_ok:
+            log.info("  🔥 Firestore 已連線")
+        else:
+            log.error("  ❌ Firestore 初始化後仍不可用")
     except Exception as e:
         log.error(f"  ❌ Firestore 連線失敗: {e}")
-        log.error("  ⚠️ 用戶資料將無法持久化！")
+
+    if not firestore_ok:
+        log.error("  ⚠️ Firestore 不可用 — 用戶資料將無法持久化！")
+        log.error("  ⚠️ 跳過 Super Admin / Admin 帳號初始化")
 
     register_telegram_webhook()
     set_telegram_commands()
 
-    # Super Admin 自動建立/修復（最高權限，強制核准）
-    if SUPERADMIN_CHAT_ID:
-        sa_id = f"tg_{SUPERADMIN_CHAT_ID}"
-        sa_user = get_user(sa_id)
-        needs_update = (
-            not sa_user
-            or sa_user.get("role") != ROLE_SUPERADMIN
-            or sa_user.get("status") != "approved"
-        )
-        if needs_update:
-            # 保留原有姓名（如果有的話）
-            existing_name = sa_user.get("name", "Owner") if sa_user else "Owner"
-            existing_username = sa_user.get("username", "") if sa_user else ""
-            save_user(sa_id, {
-                "provider": "telegram",
-                "provider_id": SUPERADMIN_CHAT_ID,
-                "name": existing_name,
-                "username": existing_username,
-                "status": "approved",
-                "role": ROLE_SUPERADMIN,
-                "telegram_chat_id": SUPERADMIN_CHAT_ID,
-                "created_at": sa_user.get("created_at", datetime.now().isoformat()) if sa_user else datetime.now().isoformat(),
-                "reviewed_at": datetime.now().isoformat(),
-            })
-            log.info(f"  👑 Super Admin 帳號已{'修復' if sa_user else '建立'}並強制核准")
+    # ── 以下全部依賴 Firestore，不可用時跳過 ──
+    if firestore_ok:
+        # Super Admin 自動建立/修復（最高權限，強制核准）
+        if SUPERADMIN_CHAT_ID:
+            sa_id = f"tg_{SUPERADMIN_CHAT_ID}"
+            sa_user = get_user(sa_id)
+            needs_update = (
+                not sa_user
+                or sa_user.get("role") != ROLE_SUPERADMIN
+                or sa_user.get("status") != "approved"
+            )
+            if needs_update:
+                existing_name = sa_user.get("name", "Owner") if sa_user else "Owner"
+                existing_username = sa_user.get("username", "") if sa_user else ""
+                save_user(sa_id, {
+                    "provider": "telegram",
+                    "provider_id": SUPERADMIN_CHAT_ID,
+                    "name": existing_name,
+                    "username": existing_username,
+                    "status": "approved",
+                    "role": ROLE_SUPERADMIN,
+                    "telegram_chat_id": SUPERADMIN_CHAT_ID,
+                    "created_at": sa_user.get("created_at", datetime.now().isoformat()) if sa_user else datetime.now().isoformat(),
+                    "reviewed_at": datetime.now().isoformat(),
+                })
+                log.info(f"  👑 Super Admin 帳號已{'修復' if sa_user else '建立'}並強制核准")
+            else:
+                log.info("  👑 Super Admin 帳號已存在且已核准")
         else:
-            log.info("  👑 Super Admin 帳號已存在且已核准")
-    else:
-        log.warning("  ⚠️ SUPERADMIN_CHAT_ID 未設定，無法建立 Super Admin")
+            log.warning("  ⚠️ SUPERADMIN_CHAT_ID 未設定，無法建立 Super Admin")
 
-    # 環境變數指定的管理員（如有設定且不是 Super Admin）
-    if ADMIN_TG_CHAT_ID and ADMIN_TG_CHAT_ID != SUPERADMIN_CHAT_ID:
-        admin_id = f"tg_{ADMIN_TG_CHAT_ID}"
-        if not get_user(admin_id):
-            save_user(admin_id, {
-                "provider": "telegram",
-                "provider_id": ADMIN_TG_CHAT_ID,
-                "name": "Admin",
-                "username": "",
-                "status": "approved",
-                "role": ROLE_ADMIN,
-                "telegram_chat_id": ADMIN_TG_CHAT_ID,
-                "created_at": datetime.now().isoformat(),
-                "reviewed_at": datetime.now().isoformat(),
-            })
-            log.info("  ✅ 管理員帳號已自動建立")
+        # 環境變數指定的管理員
+        if ADMIN_TG_CHAT_ID and ADMIN_TG_CHAT_ID != SUPERADMIN_CHAT_ID:
+            admin_id = f"tg_{ADMIN_TG_CHAT_ID}"
+            if not get_user(admin_id):
+                save_user(admin_id, {
+                    "provider": "telegram",
+                    "provider_id": ADMIN_TG_CHAT_ID,
+                    "name": "Admin",
+                    "username": "",
+                    "status": "approved",
+                    "role": ROLE_ADMIN,
+                    "telegram_chat_id": ADMIN_TG_CHAT_ID,
+                    "created_at": datetime.now().isoformat(),
+                    "reviewed_at": datetime.now().isoformat(),
+                })
+                log.info("  ✅ 管理員帳號已自動建立")
 
     _keepalive_thread = threading.Thread(target=keepalive_worker, daemon=True)
     _keepalive_thread.start()
     log.info("  🏓 Keep-alive 已啟動")
 
     # 通知管理員服務啟動
-    pending_count = len(get_pending_users())
+    db_status = "🔥 Firestore: ✅" if firestore_ok else "⚠️ Firestore: ❌ 離線模式"
+    pending_count = len(get_pending_users()) if firestore_ok else 0
     pending_info = f"\n⏳ 待審核用戶：{pending_count} 人" if pending_count > 0 else ""
     notify_admin("🚅 <b>ATO 已啟動</b>\n\n"
                  f"Telegram: {'✅' if TG_TOKEN else '❌'}\n"
+                 f"{db_status}\n"
                  f"Session: {SESSION_TIMEOUT // 3600}h\n"
                  f"時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
                  f"{pending_info}")
 
     # 啟動時自動重新推播待審核用戶
-    if pending_count > 0:
+    if firestore_ok and pending_count > 0:
         log.info(f"📋 發現 {pending_count} 位待審核用戶，重新推播審核通知...")
         notify_pending_users_to_admin()
 
