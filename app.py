@@ -347,6 +347,22 @@ def format_timetable_result(data: dict, from_st: str, to_st: str,
                     trains = inner[key]
                     break
 
+    # ── 排序：依出發時間排序 ──
+    def sort_key(t):
+        return t.get("DepartureTime_Order", t.get("DepartureTime", "99:99"))
+    trains = sorted(trains, key=sort_key)
+
+    # ── 過濾：只顯示 >= 指定時間的班次 ──
+    if time_str:
+        filtered = [t for t in trains
+                    if t.get("DepartureTime", "00:00") >= time_str]
+        # 如果過濾後沒班次（例如太晚了），fallback 顯示最後幾班
+        if not filtered and trains:
+            filtered = trains[-5:]
+        trains = filtered
+
+    total_matching = len(trains)
+
     lines = [
         f"🚅 <b>高鐵時刻表查詢結果</b>",
         f"",
@@ -361,8 +377,8 @@ def format_timetable_result(data: dict, from_st: str, to_st: str,
         lines.append("💡 可能原因：日期超出範圍或無此區間列車")
         return "\n".join(lines), None
 
-    # 限制顯示前 8 班
-    display_trains = trains[:8] if len(trains) > 8 else trains
+    # 限制顯示前 15 班
+    display_trains = trains[:15] if len(trains) > 15 else trains
 
     inline_buttons = []  # 收集每個班次的按鈕
 
@@ -409,18 +425,46 @@ def format_timetable_result(data: dict, from_st: str, to_st: str,
             btn_text = f"🎫 {train_no} — {depart}"
             inline_buttons.append([{"text": btn_text, "callback_data": cb_data}])
 
-    if len(trains) > 8:
-        lines.append(f"\n... 還有 {len(trains) - 8} 班次")
+    if len(trains) > 15:
+        lines.append(f"\n... 還有 {len(trains) - 15} 班次")
 
     lines.append("")
-    lines.append(f"💡 共 {len(trains)} 班次")
+    lines.append(f"💡 共 {total_matching} 班符合班次")
 
     if with_buttons and inline_buttons:
         lines.append("")
         lines.append("👇 點選班次直接訂票：")
 
+    # ── 往前/往後 30 分鐘導航按鈕 ──
+    if with_buttons:
+        nav_row = []
+        earlier = _shift_time(time_str, -30)
+        later = _shift_time(time_str, 30)
+        if earlier:
+            nav_row.append({"text": f"⬅️ 往前 ({earlier})",
+                            "callback_data": f"nav:{from_st}:{to_st}:{date}:{earlier}"})
+        if later:
+            nav_row.append({"text": f"➡️ 往後 ({later})",
+                            "callback_data": f"nav:{from_st}:{to_st}:{date}:{later}"})
+        if nav_row:
+            if not inline_buttons:
+                inline_buttons = []
+            inline_buttons.append(nav_row)
+
     buttons = inline_buttons if inline_buttons else None
     return "\n".join(lines), buttons
+
+
+def _shift_time(time_str: str, delta_minutes: int) -> str | None:
+    """將時間字串偏移指定分鐘數，回傳新時間或 None（超出範圍）"""
+    try:
+        h, m = map(int, time_str.split(":"))
+        total = h * 60 + m + delta_minutes
+        if total < 0 or total >= 24 * 60:
+            return None
+        return f"{total // 60:02d}:{total % 60:02d}"
+    except (ValueError, AttributeError):
+        return None
 
 
 
@@ -1342,13 +1386,46 @@ def run_booking_thread():
     booking_status["last_result"] = result
     booking_status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    c = booking_config
     if result.get("success"):
-        msg = f"✅ <b>訂票成功！</b>\n─────────────────\n路線：{booking_config['from_station']} → {booking_config['to_station']}\n日期：{booking_config['travel_date']}\n"
-        for k, v in result.items():
-            if k not in ("success", "url", "timestamp"):
-                msg += f"{k}：{v}\n"
+        booking_id = result.get('訂位代號', '—')
+        train_no = result.get('車次', '—')
+        depart_time = result.get('出發時間', '—')
+        seat = result.get('座位', '—')
+
+        msg = "\n".join([
+            "🎉🎉🎉",
+            "",
+            "✅ <b>訂票成功！</b>",
+            "═════════════════",
+            "",
+            f"🔖 訂位代號：<b><code>{booking_id}</code></b>",
+            "",
+            f"🚅 車次：<b>{train_no}</b>",
+            f"🚉 路線：<b>{c['from_station']} → {c['to_station']}</b>",
+            f"📅 日期：<b>{c['travel_date']}</b>",
+            f"🕐 出發：<b>{depart_time}</b>",
+            f"💺 座位：<b>{seat}</b>",
+            f"👤 人數：<b>{c['adult_count']} 人</b>",
+            "",
+            "═════════════════",
+            f"🔄 共嘗試 {booking_status['attempts']} 次",
+            f"🕐 完成時間：{booking_status['last_run']}",
+            "",
+            "⚠️ 請務必在時限內完成付款！",
+            "🌐 高鐵付款頁面：https://irs.thsrc.com.tw/IMINT/",
+        ])
     else:
-        msg = f"❌ <b>訂票失敗</b>\n已嘗試 {booking_status['attempts']} 次\n原因：{result.get('error', '未知')}"
+        msg = "\n".join([
+            "❌ <b>訂票失敗</b>",
+            "─────────────────",
+            f"🚉 路線：{c['from_station']} → {c['to_station']}",
+            f"📅 日期：{c['travel_date']}　🕐 {c['travel_time']}",
+            f"🔄 已嘗試：{booking_status['attempts']} 次",
+            f"❗ 原因：{result.get('error', '未知')}",
+            "",
+            "💡 可 /book 重新嘗試",
+        ])
 
     notify_admin(msg)
 
@@ -1409,6 +1486,25 @@ def telegram_webhook():
                 send_telegram(cb_chat_id, text, reply_markup=markup)
             else:
                 edit_telegram_message(cb_chat_id, cb["message"]["message_id"], text)
+            return jsonify({"ok": True})
+
+        if cb_data.startswith("nav:"):
+            # 時間導航回調: nav:<from>:<to>:<date>:<new_time>
+            answer_callback(cb["id"], "🔍 查詢中...")
+            parts = cb_data.split(":", 4)
+            if len(parts) == 5:
+                _, nav_from, nav_to, nav_date, nav_time = parts
+                # 更新原訊息為「查詢中」
+                if cb.get("message"):
+                    edit_telegram_message(cb_chat_id, cb["message"]["message_id"],
+                                          f"🔍 查詢 {nav_from}→{nav_to} {nav_date} {nav_time}...")
+                result_text, result_buttons = query_thsr_timetable_with_buttons(
+                    nav_from, nav_to, nav_date, nav_time)
+                if result_buttons:
+                    send_telegram(cb_chat_id, result_text,
+                                  reply_markup={"inline_keyboard": result_buttons})
+                else:
+                    send_telegram(cb_chat_id, result_text)
             return jsonify({"ok": True})
 
         if cb_data.startswith("bk:"):
