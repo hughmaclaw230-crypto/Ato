@@ -208,7 +208,7 @@ booking_config = {
     "travel_time":    os.environ.get("TRAVEL_TIME", ""),
     "adult_count":    int(os.environ.get("ADULT_COUNT", "1")),
     "seat_type":      os.environ.get("SEAT_TYPE", "無座位偏好"),
-    "max_retries":    int(os.environ.get("MAX_RETRIES", "30")),
+    "max_retries":    int(os.environ.get("MAX_RETRIES", "720")),
     "retry_interval": float(os.environ.get("RETRY_INTERVAL", "3")),
 }
 
@@ -306,7 +306,8 @@ def query_thsr_timetable(from_station: str, to_station: str,
             return f"❌ 查詢失敗 (HTTP {r.status_code})"
 
         data = r.json()
-        return format_timetable_result(data, from_station, to_station, date, time_str)
+        text, _ = format_timetable_result(data, from_station, to_station, date, time_str)
+        return text
 
     except requests.exceptions.Timeout:
         return "❌ 查詢逾時，請稍後再試"
@@ -319,8 +320,13 @@ def query_thsr_timetable(from_station: str, to_station: str,
 
 
 def format_timetable_result(data: dict, from_st: str, to_st: str,
-                            date: str, time_str: str) -> str:
-    """格式化時刻表查詢結果 — 基於 thsrc.com.tw API 回傳結構"""
+                            date: str, time_str: str,
+                            with_buttons: bool = False) -> tuple[str, list | None]:
+    """
+    格式化時刻表查詢結果 — 基於 thsrc.com.tw API 回傳結構
+    with_buttons=True 時回傳可點選的班次按鈕列表
+    回傳: (text, buttons_or_None)
+    """
 
     # API 回傳結構: { success: true, data: { DepartureTable: { TrainItem: [...] } } }
     trains = []
@@ -353,10 +359,12 @@ def format_timetable_result(data: dict, from_st: str, to_st: str,
         lines.append("")
         lines.append("📋 未找到符合的班次")
         lines.append("💡 可能原因：日期超出範圍或無此區間列車")
-        return "\n".join(lines)
+        return "\n".join(lines), None
 
     # 限制顯示前 8 班
     display_trains = trains[:8] if len(trains) > 8 else trains
+
+    inline_buttons = []  # 收集每個班次的按鈕
 
     for i, train in enumerate(display_trains):
         if not isinstance(train, dict):
@@ -394,17 +402,323 @@ def format_timetable_result(data: dict, from_st: str, to_st: str,
         if extras:
             lines.append(f"     {' | '.join(extras)}")
 
+        # 生成按鈕 callback_data: bk:<from>:<to>:<date>:<depart_time>:<train_no>
+        if with_buttons and depart != "-":
+            # 用出發時間取代 travel_time（更精確）
+            cb_data = f"bk:{from_st}:{to_st}:{date}:{depart}:{train_no}"
+            btn_text = f"🎫 {train_no} — {depart}"
+            inline_buttons.append([{"text": btn_text, "callback_data": cb_data}])
+
     if len(trains) > 8:
         lines.append(f"\n... 還有 {len(trains) - 8} 班次")
 
     lines.append("")
     lines.append(f"💡 共 {len(trains)} 班次")
 
-    return "\n".join(lines)
+    if with_buttons and inline_buttons:
+        lines.append("")
+        lines.append("👇 點選班次直接訂票：")
+
+    buttons = inline_buttons if inline_buttons else None
+    return "\n".join(lines), buttons
 
 
 
+def query_thsr_timetable_with_buttons(from_station: str, to_station: str,
+                                       date: str, time_str: str = "") -> tuple[str, list | None]:
+    """
+    查詢高鐵時刻表（帶可點選班次按鈕）
+    回傳: (text, buttons_list_or_None)
+    """
+    from_en = STATION_EN_MAP.get(from_station)
+    to_en = STATION_EN_MAP.get(to_station)
 
+    if not from_en or not to_en:
+        return f"❌ 無效站名：{from_station} 或 {to_station}", None
+    if from_en == to_en:
+        return "❌ 出發站與到達站不能相同", None
+
+    if not time_str:
+        time_str = datetime.now().strftime("%H:%M")
+    date = date.replace("-", "/")
+
+    url = "https://www.thsrc.com.tw/TimeTable/Search"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "Accept": "application/json, text/javascript, */*",
+        "Referer": "https://www.thsrc.com.tw/ArticleContent/a3b630bb-1066-4352-a1ef-58c7b4e8ef7c",
+        "Origin": "https://www.thsrc.com.tw",
+    }
+    payload = {
+        "SearchType": "S", "Lang": "TW",
+        "StartStation": from_en, "EndStation": to_en,
+        "OutWardSearchDate": date, "OutWardSearchTime": time_str,
+        "ReturnSearchDate": date, "ReturnSearchTime": time_str,
+        "DiscountType": "",
+    }
+
+    try:
+        log.info(f"🔍 查詢時刻表(帶按鈕): {from_station}→{to_station} {date} {time_str}")
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        r = requests.post(url, data=payload, headers=headers, timeout=15, verify=False)
+        if r.status_code != 200:
+            return f"❌ 查詢失敗 (HTTP {r.status_code})", None
+        data = r.json()
+        return format_timetable_result(data, from_station, to_station, date, time_str,
+                                       with_buttons=True)
+    except requests.exceptions.Timeout:
+        return "❌ 查詢逾時，請稍後再試", None
+    except json.JSONDecodeError:
+        return "❌ 高鐵時刻表暫時無法查詢，請稍後再試", None
+    except Exception as e:
+        log.error(f"時刻表查詢錯誤: {e}")
+        return f"❌ 查詢失敗: {str(e)[:50]}", None
+
+
+# ═══════════════════════════════════════════════════════════
+#  班次訂票回調（點選班次 → 詢問個人資料 → 訂票）
+# ═══════════════════════════════════════════════════════════
+
+_pending_bookings = {}  # chat_id -> { from, to, date, time, train_no, step, id_number, phone }
+_pending_lock = threading.Lock()
+
+
+def get_pending_booking(chat_id: str) -> dict | None:
+    with _pending_lock:
+        return _pending_bookings.get(chat_id)
+
+
+def set_pending_booking(chat_id: str, data: dict):
+    with _pending_lock:
+        _pending_bookings[chat_id] = data
+
+
+def clear_pending_booking(chat_id: str):
+    with _pending_lock:
+        _pending_bookings.pop(chat_id, None)
+
+
+def handle_train_booking_callback(cb: dict, cb_data: str, chat_id: str):
+    """
+    處理點選班次按鈕回調
+    cb_data 格式: bk:<from>:<to>:<date>:<time>:<train_no>
+    """
+    answer_callback(cb["id"], "🎫 準備訂票...")
+
+    parts = cb_data.split(":", 5)
+    if len(parts) < 6:
+        send_telegram(chat_id, "❌ 資料格式錯誤，請重新搜尋")
+        return
+
+    _, from_st, to_st, date, depart_time, train_no = parts
+
+    # 檢查是否已有個人資料
+    c = booking_config
+    has_id = bool(c.get("id_number"))
+    has_phone = bool(c.get("phone"))
+
+    if has_id and has_phone:
+        # 個人資料已齊全 → 直接顯示確認畫面
+        set_pending_booking(chat_id, {
+            "from_station": from_st,
+            "to_station": to_st,
+            "date": date,
+            "time": depart_time,
+            "train_no": train_no,
+            "step": "confirm",
+            "id_number": c["id_number"],
+            "phone": c["phone"],
+        })
+        _send_booking_confirm(chat_id, from_st, to_st, date, depart_time, train_no)
+    else:
+        # 需要個人資料 → 開始詢問
+        set_pending_booking(chat_id, {
+            "from_station": from_st,
+            "to_station": to_st,
+            "date": date,
+            "time": depart_time,
+            "train_no": train_no,
+            "step": "ask_id",
+            "id_number": c.get("id_number", ""),
+            "phone": c.get("phone", ""),
+        })
+        send_telegram(chat_id, "\n".join([
+            f"🎫 <b>訂票準備 — 車次 {train_no}</b>",
+            f"",
+            f"🚉 {from_st} → {to_st}",
+            f"📅 {date}　🕐 {depart_time}",
+            f"─────────────────",
+            f"",
+            f"📝 請輸入您的<b>身分證字號</b>：",
+            f"",
+            f"💡 直接輸入即可（例：A123456789）",
+            f"❌ 輸入 /cancel 取消",
+        ]))
+
+
+def _send_booking_confirm(chat_id: str, from_st: str, to_st: str,
+                           date: str, time_str: str, train_no: str):
+    """發送訂票確認畫面（含按鈕）"""
+    pb = get_pending_booking(chat_id)
+    id_masked = pb["id_number"][:3] + "***" + pb["id_number"][-2:] if len(pb.get("id_number", "")) >= 5 else "✅"
+    phone_masked = pb["phone"][:4] + "***" + pb["phone"][-2:] if len(pb.get("phone", "")) >= 6 else "✅"
+
+    text = "\n".join([
+        f"🎫 <b>訂票確認</b>",
+        f"",
+        f"🚅 車次：<b>{train_no}</b>",
+        f"🚉 路線：<b>{from_st} → {to_st}</b>",
+        f"📅 日期：<b>{date}</b>",
+        f"🕐 出發：<b>{time_str}</b>",
+        f"👤 人數：<b>{booking_config['adult_count']} 人</b>",
+        f"💺 座位：<b>{booking_config['seat_type']}</b>",
+        f"─────────────────",
+        f"🆔 身分證：{id_masked}",
+        f"📱 手機：{phone_masked}",
+        f"🔄 最多重試：{booking_config['max_retries']} 次",
+        f"",
+        f"確認開始訂票？",
+    ])
+
+    buttons = {"inline_keyboard": [
+        [{"text": "🚀 確認訂票", "callback_data": f"bkconfirm:go:{chat_id}"}],
+        [{"text": "✏️ 修改資料", "callback_data": f"bkconfirm:edit:{chat_id}"},
+         {"text": "❌ 取消", "callback_data": f"bkconfirm:cancel:{chat_id}"}],
+    ]}
+
+    send_telegram(chat_id, text, reply_markup=buttons)
+
+
+def handle_booking_confirm_callback(cb: dict, cb_data: str, chat_id: str):
+    """處理訂票確認按鈕回調"""
+    parts = cb_data.split(":", 2)
+    if len(parts) < 3:
+        answer_callback(cb["id"], "❌ 無效操作")
+        return
+
+    action = parts[1]
+
+    if action == "cancel":
+        answer_callback(cb["id"], "❌ 已取消")
+        clear_pending_booking(chat_id)
+        if cb.get("message"):
+            edit_telegram_message(chat_id, cb["message"]["message_id"],
+                                  "❌ 已取消訂票")
+        return
+
+    if action == "edit":
+        answer_callback(cb["id"], "✏️ 重新輸入")
+        pb = get_pending_booking(chat_id)
+        if pb:
+            pb["step"] = "ask_id"
+            set_pending_booking(chat_id, pb)
+            send_telegram(chat_id, "📝 請重新輸入<b>身分證字號</b>：")
+        else:
+            send_telegram(chat_id, "⚠️ 訂票資料已過期，請重新搜尋 /search")
+        return
+
+    if action == "go":
+        answer_callback(cb["id"], "🚀 開始訂票！")
+        pb = get_pending_booking(chat_id)
+        if not pb:
+            send_telegram(chat_id, "⚠️ 訂票資料已過期，請重新搜尋 /search")
+            return
+
+        # 更新 booking_config
+        booking_config["from_station"] = pb["from_station"]
+        booking_config["to_station"] = pb["to_station"]
+        booking_config["travel_date"] = pb["date"]
+        booking_config["travel_time"] = pb["time"]
+        booking_config["id_number"] = pb["id_number"]
+        booking_config["phone"] = pb["phone"]
+
+        clear_pending_booking(chat_id)
+
+        # 更新確認訊息
+        if cb.get("message"):
+            edit_telegram_message(chat_id, cb["message"]["message_id"],
+                f"🚀 <b>訂票已啟動！</b>\n\n"
+                f"🚅 車次 {pb['train_no']}\n"
+                f"🚉 {pb['from_station']} → {pb['to_station']}\n"
+                f"📅 {pb['date']}　🕐 {pb['time']}")
+
+        # 啟動訂票
+        result = start_booking()
+        send_telegram(chat_id, result)
+
+
+def handle_pending_booking_input(chat_id: str, text: str) -> bool:
+    """
+    處理用戶輸入的個人資料（身分證/手機）
+    回傳 True 表示已處理（不再走指令邏輯），False 表示不是訂票輸入
+    """
+    pb = get_pending_booking(chat_id)
+    if not pb:
+        return False
+
+    step = pb.get("step", "")
+
+    if text.strip().lower() == "/cancel":
+        clear_pending_booking(chat_id)
+        send_telegram(chat_id, "❌ 已取消訂票")
+        return True
+
+    if step == "ask_id":
+        id_num = text.strip().upper()
+        # 簡單驗證台灣身分證格式
+        if not re.match(r'^[A-Z][12]\d{8}$', id_num):
+            send_telegram(chat_id, "\n".join([
+                "❌ 身分證字號格式不正確",
+                "",
+                "✅ 正確格式：英文字母 + 9 位數字",
+                "📝 例：A123456789",
+                "",
+                "請重新輸入，或 /cancel 取消",
+            ]))
+            return True
+
+        pb["id_number"] = id_num
+        pb["step"] = "ask_phone"
+        set_pending_booking(chat_id, pb)
+
+        send_telegram(chat_id, "\n".join([
+            f"✅ 身分證已記錄",
+            f"",
+            f"📱 請輸入您的<b>手機號碼</b>：",
+            f"",
+            f"💡 例：0912345678",
+            f"❌ 輸入 /cancel 取消",
+        ]))
+        return True
+
+    if step == "ask_phone":
+        phone = text.strip()
+        if not re.match(r'^09\d{8}$', phone):
+            send_telegram(chat_id, "\n".join([
+                "❌ 手機號碼格式不正確",
+                "",
+                "✅ 正確格式：09 開頭 + 8 位數字",
+                "📝 例：0912345678",
+                "",
+                "請重新輸入，或 /cancel 取消",
+            ]))
+            return True
+
+        pb["phone"] = phone
+        pb["step"] = "confirm"
+        set_pending_booking(chat_id, pb)
+
+        # 個人資料收集完畢 → 顯示確認畫面
+        _send_booking_confirm(
+            chat_id,
+            pb["from_station"], pb["to_station"],
+            pb["date"], pb["time"], pb["train_no"]
+        )
+        return True
+
+    return False
 
 
 # ═══════════════════════════════════════════════════════════
@@ -828,10 +1142,10 @@ def process_command(cmd: str, args: str) -> str:
     elif cmd == "retry":
         try:
             n = int(args)
-            if 1 <= n <= 100:
+            if 1 <= n <= 1000:
                 booking_config["max_retries"] = n
                 return f"✅ 重試次數：<b>{n}</b>"
-            return "❌ 請在 1-100 之間"
+            return "❌ 請在 1-1000 之間"
         except ValueError:
             return "❌ 請輸入數字"
     elif cmd == "interval":
@@ -967,7 +1281,7 @@ def telegram_webhook():
     touch_session()
     data = request.get_json(silent=True) or {}
 
-    # 處理按鈕回調 (管理員審核 + 搜尋表單)
+    # 處理按鈕回調 (管理員審核 + 搜尋表單 + 班次訂票)
     if "callback_query" in data:
         cb = data["callback_query"]
         cb_data = cb.get("data", "")
@@ -979,16 +1293,20 @@ def telegram_webhook():
             text, markup, is_final = handle_form_callback(cb_chat_id, cb_data)
 
             if is_final:
-                # 表單完成 → 執行查詢
+                # 表單完成 → 執行查詢（帶按鈕）
                 form = get_completed_form(cb_chat_id)
                 if form:
                     clear_form(cb_chat_id)
-                    result = query_thsr_timetable(
+                    result_text, result_buttons = query_thsr_timetable_with_buttons(
                         form["from_station"], form["to_station"],
                         form["date"], form["time"])
                     edit_telegram_message(cb_chat_id, cb["message"]["message_id"],
                                           "🔍 查詢中...")
-                    send_telegram(cb_chat_id, result)
+                    if result_buttons:
+                        send_telegram(cb_chat_id, result_text,
+                                      reply_markup={"inline_keyboard": result_buttons})
+                    else:
+                        send_telegram(cb_chat_id, result_text)
                 else:
                     send_telegram(cb_chat_id, "❌ 表單資料不完整，請重新 /search")
             elif markup:
@@ -996,6 +1314,16 @@ def telegram_webhook():
                 send_telegram(cb_chat_id, text, reply_markup=markup)
             else:
                 edit_telegram_message(cb_chat_id, cb["message"]["message_id"], text)
+            return jsonify({"ok": True})
+
+        if cb_data.startswith("bk:"):
+            # 班次訂票回調: bk:<from>:<to>:<date>:<time>:<train_no>
+            handle_train_booking_callback(cb, cb_data, cb_chat_id)
+            return jsonify({"ok": True})
+
+        if cb_data.startswith("bkconfirm:"):
+            # 確認訂票回調
+            handle_booking_confirm_callback(cb, cb_data, cb_chat_id)
             return jsonify({"ok": True})
 
         if cb_data.startswith("approve:") or cb_data.startswith("reject:"):
@@ -1017,6 +1345,10 @@ def telegram_webhook():
     username = from_user.get("username", "")
 
     log.info(f"🤖 TG {chat_id} ({name}): {text}")
+
+    # ── 優先處理訂票個人資料輸入（身分證/手機）──
+    if handle_pending_booking_input(chat_id, text):
+        return jsonify({"ok": True})
 
     # 解析指令
     cmd_match = re.match(r"^/(\w+)(?:@\w+)?\s*(.*)", text, re.DOTALL)
@@ -1129,10 +1461,14 @@ def telegram_webhook():
             parsed = parse_smart_search(args)
             if parsed:
                 send_telegram(chat_id, "🔍 查詢中...")
-                result = query_thsr_timetable(
+                result_text, result_buttons = query_thsr_timetable_with_buttons(
                     parsed["from_station"], parsed["to_station"],
                     parsed["date"], parsed["time"])
-                send_telegram(chat_id, result)
+                if result_buttons:
+                    send_telegram(chat_id, result_text,
+                                  reply_markup={"inline_keyboard": result_buttons})
+                else:
+                    send_telegram(chat_id, result_text)
             else:
                 send_telegram(chat_id, "\n".join([
                     "❌ 格式錯誤",
