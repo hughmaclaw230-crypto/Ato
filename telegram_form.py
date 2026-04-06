@@ -144,12 +144,12 @@ def handle_form_callback(chat_id: str, cb_data: str) -> tuple[str, dict | None, 
 
     # ── 時段切換 ──
     if action == "timegroup":
-        group = parts[2] if len(parts) > 2 else "pm"
+        group = parts[2] if len(parts) > 2 else "am"
         return _build_time_step(form, group=group)
 
     # ── 確認查詢 ──
     if action == "exec":
-        clear_form(chat_id)
+        # 注意：不在此處 clear_form，由 app.py 讀取表單資料後再清除
         return "", None, True  # is_final=True
 
     # ── 返回上一步 ──
@@ -207,12 +207,13 @@ def _build_date_step(form: dict) -> tuple[str, dict, bool]:
     return text, {"inline_keyboard": buttons}, False
 
 
-def _build_time_step(form: dict, group: str = "pm") -> tuple[str, dict, bool]:
+def _build_time_step(form: dict, group: str = "am") -> tuple[str, dict, bool]:
+    group_label = "上午 06:00-11:30" if group == "am" else "下午 12:00-22:30"
     text = (f"🔍 <b>高鐵時刻表查詢</b>\n\n"
             f"🟢 出發站：<b>{form['from_station']}</b>\n"
             f"🟢 到達站：<b>{form['to_station']}</b>\n"
             f"🟢 日期：<b>{form.get('date','')}</b>\n\n"
-            f"🕐 請選擇<b>出發時間</b>：")
+            f"🕐 請選擇<b>出發時間</b>（{group_label}）：")
 
     times = AFTERNOON_TIMES if group == "pm" else MORNING_TIMES
 
