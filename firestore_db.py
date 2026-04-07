@@ -21,6 +21,80 @@ _init_failed = False  # 初始化曾失敗 → 不再重試，避免反覆報錯
 USERS_COLLECTION = "users"
 
 
+def _parse_firebase_json(raw: str) -> dict:
+    """
+    解析 Firebase 憑證 JSON，處理常見的 Render 環境變數問題：
+    1. 正常 JSON
+    2. 被額外引號包裹的 JSON (Render UI 有時會加)
+    3. 換行符被 literal \\n 取代
+    4. 雙重轉義的 JSON
+    5. Base64 編碼的 JSON
+    """
+    raw = raw.strip()
+    if not raw:
+        raise ValueError("FIREBASE_CREDENTIALS_JSON 為空")
+
+    # 嘗試 1: 直接 parse
+    try:
+        d = json.loads(raw)
+        if isinstance(d, dict) and "project_id" in d:
+            log.info("🔥 憑證解析成功（直接 JSON）")
+            return d
+    except json.JSONDecodeError:
+        pass
+
+    # 嘗試 2: 去掉外層引號 (Render 有時會多包一層)
+    if (raw.startswith("'") and raw.endswith("'")) or \
+       (raw.startswith('"') and raw.endswith('"')):
+        try:
+            inner = raw[1:-1]
+            d = json.loads(inner)
+            if isinstance(d, dict) and "project_id" in d:
+                log.info("🔥 憑證解析成功（去除外層引號）")
+                return d
+        except json.JSONDecodeError:
+            pass
+
+    # 嘗試 3: 替換 literal \\n 為真正的換行（private_key 常見問題）
+    try:
+        fixed = raw.replace("\\\\n", "\\n")
+        d = json.loads(fixed)
+        if isinstance(d, dict) and "project_id" in d:
+            log.info("🔥 憑證解析成功（修復 escaped newlines）")
+            return d
+    except json.JSONDecodeError:
+        pass
+
+    # 嘗試 4: 雙重 JSON 轉義（整個 JSON 被 json.dumps 過一次）
+    try:
+        unescaped = json.loads(raw)  # 第一層
+        if isinstance(unescaped, str):
+            d = json.loads(unescaped)  # 第二層
+            if isinstance(d, dict) and "project_id" in d:
+                log.info("🔥 憑證解析成功（雙重 JSON 轉義）")
+                return d
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 嘗試 5: Base64 編碼
+    try:
+        import base64
+        decoded = base64.b64decode(raw).decode("utf-8")
+        d = json.loads(decoded)
+        if isinstance(d, dict) and "project_id" in d:
+            log.info("🔥 憑證解析成功（Base64）")
+            return d
+    except Exception:
+        pass
+
+    # 全部失敗 — 輸出診斷訊息
+    preview = raw[:80] + "..." if len(raw) > 80 else raw
+    log.error(f"❌ 無法解析 FIREBASE_CREDENTIALS_JSON（長度={len(raw)}）")
+    log.error(f"   前 80 字元: {preview}")
+    log.error(f"   開頭字元: {repr(raw[:3])}  結尾字元: {repr(raw[-3:])}")
+    raise ValueError(f"FIREBASE_CREDENTIALS_JSON 格式無效（長度={len(raw)}，開頭={repr(raw[:10])}）")
+
+
 def _init_firestore():
     """初始化 Firebase / Firestore 連線（含重複初始化保護）"""
     global _db, _init_failed
@@ -44,10 +118,10 @@ def _init_firestore():
         except ValueError:
             # 尚未初始化，正常建立
             if cred_json:
-                cred_dict = json.loads(cred_json)
+                cred_dict = _parse_firebase_json(cred_json)
                 cred = credentials.Certificate(cred_dict)
                 firebase_admin.initialize_app(cred)
-                log.info("🔥 Firebase 已透過 JSON 憑證初始化")
+                log.info(f"🔥 Firebase 已透過 JSON 憑證初始化 (project: {cred_dict.get('project_id', '?')})")
             elif cred_file:
                 cred = credentials.Certificate(cred_file)
                 firebase_admin.initialize_app(cred)
