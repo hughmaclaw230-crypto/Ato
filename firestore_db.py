@@ -21,6 +21,51 @@ _init_failed = False  # 初始化曾失敗 → 不再重試，避免反覆報錯
 USERS_COLLECTION = "users"
 
 
+def _sanitize_private_key(cred_dict: dict) -> dict:
+    """
+    清理 private_key 欄位：
+    - 將 literal \\n 轉為真正的換行
+    - 移除 -----END PRIVATE KEY-----\n 之後的多餘字元
+    - 確保 PEM 格式正確
+    """
+    pk = cred_dict.get("private_key", "")
+    if not pk:
+        return cred_dict
+
+    # 替換 literal \\n 為真正的換行符
+    if "\\n" in pk and "\n" not in pk:
+        pk = pk.replace("\\n", "\n")
+
+    # 移除 END 標記後的多餘內容
+    end_marker = "-----END PRIVATE KEY-----"
+    end_idx = pk.find(end_marker)
+    if end_idx >= 0:
+        pk = pk[:end_idx + len(end_marker)] + "\n"
+
+    # 確保開頭有 BEGIN 標記
+    begin_marker = "-----BEGIN PRIVATE KEY-----"
+    begin_idx = pk.find(begin_marker)
+    if begin_idx > 0:
+        pk = pk[begin_idx:]
+
+    # 移除多餘空行但保留必要的換行
+    lines = pk.split("\n")
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped or line == "":  # 保留空行在 BEGIN/END 之後
+            cleaned_lines.append(stripped if stripped else "")
+    pk = "\n".join(cleaned_lines)
+
+    # 確保結尾有換行
+    if not pk.endswith("\n"):
+        pk += "\n"
+
+    cred_dict["private_key"] = pk
+    log.debug(f"private_key 長度: {len(pk)}, 行數: {pk.count(chr(10))}")
+    return cred_dict
+
+
 def _parse_firebase_json(raw: str) -> dict:
     """
     解析 Firebase 憑證 JSON，處理常見的 Render 環境變數問題：
@@ -39,7 +84,7 @@ def _parse_firebase_json(raw: str) -> dict:
         d = json.loads(raw)
         if isinstance(d, dict) and "project_id" in d:
             log.info("🔥 憑證解析成功（直接 JSON）")
-            return d
+            return _sanitize_private_key(d)
     except json.JSONDecodeError:
         pass
 
@@ -51,7 +96,7 @@ def _parse_firebase_json(raw: str) -> dict:
             d = json.loads(inner)
             if isinstance(d, dict) and "project_id" in d:
                 log.info("🔥 憑證解析成功（去除外層引號）")
-                return d
+                return _sanitize_private_key(d)
         except json.JSONDecodeError:
             pass
 
@@ -61,7 +106,7 @@ def _parse_firebase_json(raw: str) -> dict:
         d = json.loads(fixed)
         if isinstance(d, dict) and "project_id" in d:
             log.info("🔥 憑證解析成功（修復 escaped newlines）")
-            return d
+            return _sanitize_private_key(d)
     except json.JSONDecodeError:
         pass
 
@@ -72,7 +117,7 @@ def _parse_firebase_json(raw: str) -> dict:
             d = json.loads(unescaped)  # 第二層
             if isinstance(d, dict) and "project_id" in d:
                 log.info("🔥 憑證解析成功（雙重 JSON 轉義）")
-                return d
+                return _sanitize_private_key(d)
     except (json.JSONDecodeError, TypeError):
         pass
 
@@ -83,7 +128,7 @@ def _parse_firebase_json(raw: str) -> dict:
         d = json.loads(decoded)
         if isinstance(d, dict) and "project_id" in d:
             log.info("🔥 憑證解析成功（Base64）")
-            return d
+            return _sanitize_private_key(d)
     except Exception:
         pass
 
