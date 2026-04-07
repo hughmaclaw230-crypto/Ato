@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-THSRC Booking Engine — Pure Requests + ddddocr 驗證碼辨識
+THSRC Booking Engine — Pure Requests + CNN/ddddocr 雙引擎驗證碼辨識
 不需要 Playwright，使用 requests.Session 模擬完整訂票流程
 
 驗證碼策略:
-  1. 圖片預處理（參考 maxmilian/thsrc_captcha 的去噪、二值化、去弧線）
-  2. ddddocr OCR 辨識
-  3. 辨識失敗自動重試（每次驗證碼都不同）
+  1. CNN模型辨識（ONNX Runtime，94.5%準確率，gary9987/keras-TaiwanHighSpeedRail-captcha）
+  2. ddddocr OCR 辨識（備援）
+  3. 圖片預處理（參考 maxmilian/thsrc_captcha 的去噪、二值化、去弧線）
+  4. 辨識失敗自動重試（每次驗證碼都不同）
 """
 
 import os
@@ -152,15 +153,29 @@ def _remove_arc_line(arr: np.ndarray, size: tuple) -> np.ndarray:
 
 
 def decode_captcha(img_bytes: bytes) -> str:
-    """用 ddddocr 辨識驗證碼圖片"""
+    """雙引擎辨識驗證碼圖片：CNN 優先 → ddddocr 備援"""
+    # 嘗試 CNN 模型（準確率較高）
+    try:
+        from captcha_cnn import decode_captcha_cnn
+        cnn_result = decode_captcha_cnn(img_bytes)
+        if len(cnn_result) == 4:
+            log.info(f"✅ CNN 驗證碼辨識: '{cnn_result}'")
+            return cnn_result
+        else:
+            log.warning(f"CNN 辨識結果長度異常: '{cnn_result}'，切換 ddddocr")
+    except Exception as e:
+        log.warning(f"CNN 辨識失敗: {e}，切換 ddddocr")
+
+    # 備援: ddddocr（使用預處理後的圖片提高準確率）
     ocr = get_ocr()
     if ocr is None:
-        raise RuntimeError("OCR 引擎不可用")
+        raise RuntimeError("所有 OCR 引擎都不可用")
 
-    result = ocr.classification(img_bytes)
+    processed = preprocess_captcha_image(img_bytes)
+    result = ocr.classification(processed)
     # 高鐵驗證碼為 4 碼英數混合，過濾並轉大寫
     cleaned = "".join(c for c in result.upper() if c.isalnum())[:4]
-    log.info(f"驗證碼辨識: '{result}' → '{cleaned}'")
+    log.info(f"📝 ddddocr 驗證碼辨識: '{result}' → '{cleaned}'")
     return cleaned
 
 
@@ -237,9 +252,8 @@ def run_booking(config: dict, status: dict) -> dict:
                 time.sleep(retry_interval)
                 continue
 
-            # 預處理 + OCR
-            processed = preprocess_captcha_image(captcha_resp.content)
-            captcha_text = decode_captcha(processed)
+            # 驗證碼辨識（CNN 直接處理原圖，ddddocr 用預處理後的圖）
+            captcha_text = decode_captcha(captcha_resp.content)
 
             if len(captcha_text) != 4:
                 log.warning(f"驗證碼長度不對({len(captcha_text)}: '{captcha_text}')，重試")
