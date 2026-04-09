@@ -192,6 +192,13 @@ async def run_booking():
         f"🔄 每 {retry_interval}s，最多 {max_retries} 次"
     )
 
+    # 多個入口 URL，依序嘗試
+    BOOKING_URLS = [
+        "https://irs.thsrc.com.tw/IMINT/?locale=tw",
+        "https://irs.thsrc.com.tw/IMINT/",
+        "https://www.thsrc.com.tw/ArticleContent/a3b630bb-1066-4352-a1ef-58c7b4e8ef7c",
+    ]
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -199,23 +206,38 @@ async def run_booking():
                 "--no-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-web-security",
             ]
         )
 
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 800},
+            viewport={"width": 1366, "height": 768},
             locale="zh-TW",
+            timezone_id="Asia/Taipei",
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/131.0.0.0 Safari/537.36"
             ),
+            extra_http_headers={
+                "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            },
         )
 
         # 隱藏自動化特徵
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            window.chrome = { runtime: {} };
+            Object.defineProperty(navigator, 'languages', { get: () => ['zh-TW', 'zh', 'en-US', 'en'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+            const originalQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+            );
         """)
 
         page = await context.new_page()
@@ -224,8 +246,26 @@ async def run_booking():
             log.info(f"── 第 {attempt}/{max_retries} 次嘗試 ──")
 
             try:
-                # ═══ Step 1: 打開訂票頁面 ═══
-                await page.goto(THSRC_URL, wait_until="domcontentloaded", timeout=30000)
+                # ═══ Step 1: 打開訂票頁面 (嘗試多個 URL) ═══
+                page_loaded = False
+                for url_idx, booking_url in enumerate(BOOKING_URLS):
+                    try:
+                        log.info(f"嘗試 URL {url_idx+1}/{len(BOOKING_URLS)}: {booking_url[:50]}...")
+                        resp = await page.goto(booking_url, wait_until="domcontentloaded", timeout=60000)
+                        if resp and resp.status < 400:
+                            page_loaded = True
+                            log.info(f"✅ 頁面載入成功 (HTTP {resp.status})")
+                            break
+                        else:
+                            log.warning(f"HTTP {resp.status if resp else 'None'}")
+                    except Exception as e:
+                        log.warning(f"URL {url_idx+1} 失敗: {str(e)[:80]}")
+                        continue
+
+                if not page_loaded:
+                    log.error("所有 URL 都無法連線")
+                    await asyncio.sleep(retry_interval)
+                    continue
 
                 # 等待表單載入 (確認關鍵元素出現)
                 try:
