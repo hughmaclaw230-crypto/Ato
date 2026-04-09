@@ -38,6 +38,10 @@ ADMIN_TG_CHAT_ID = os.environ.get("ADMIN_TELEGRAM_CHAT_ID", "")
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 PORT = int(os.environ.get("PORT", "5000"))
 
+# ── GitHub Actions 整合 ──
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "")  # 格式: owner/repo
+
 # ═══════════════════════════════════════════════════════════
 #  用戶資料庫（Firestore 雲端持久化）
 #  get_user / save_user / get_pending_users / get_all_users
@@ -422,7 +426,9 @@ def format_timetable_result(data: dict, from_st: str, to_st: str,
         if with_buttons and depart != "-":
             time_pack = f"{depart}-{arrive}-{duration}" if arrive and duration else depart
             cb_data = f"bk|{from_st}|{to_st}|{date}|{time_pack}|{train_no}"
-            btn_text = f"🎫 {train_no} — {depart}"
+            btn_text = f"🚄 {train_no}  {depart}→{arrive}"
+            if duration:
+                btn_text += f"  ⏱{duration}"
             inline_buttons.append([{"text": btn_text, "callback_data": cb_data}])
 
     if len(trains) > 15:
@@ -735,7 +741,7 @@ def handle_booking_confirm_callback(cb: dict, cb_data: str, chat_id: str):
                 f"⏱ 每 {search_interval} 秒搜尋，持續 {search_hours} 小時")
 
         # 啟動訂票
-        result = start_booking()
+        result = start_booking(chat_id)
         send_telegram(chat_id, result)
 
 
@@ -1217,7 +1223,7 @@ def get_help_text() -> str:
     ])
 
 
-def process_command(cmd: str, args: str) -> str:
+def process_command(cmd: str, args: str, chat_id: str = "") -> str:
     cmd = cmd.lower().strip()
 
     if cmd in ("start", "help"):
@@ -1291,7 +1297,7 @@ def process_command(cmd: str, args: str) -> str:
             lines.append("  ".join(TIME_SLOTS[i:i+4]))
         return "\n".join(lines)
     elif cmd == "book":
-        return start_booking()
+        return start_booking(chat_id)
     elif cmd == "stop":
         if booking_status["running"]:
             booking_status["running"] = False
@@ -1364,7 +1370,53 @@ def handle_timetable_command(args: str) -> str:
     return query_thsr_timetable(from_st, to_st, date, time_str)
 
 
-def start_booking() -> str:
+def trigger_github_booking(chat_id: str) -> str:
+    """
+    觸發 GitHub Actions 執行訂票 workflow
+    透過 workflow_dispatch API 啟動 headless Chromium 訂票
+    """
+    c = booking_config
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        log.warning("未設定 GITHUB_TOKEN/GITHUB_REPO，退回本地訂票")
+        return ""
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/booking.yml/dispatches"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    payload = {
+        "ref": "main",
+        "inputs": {
+            "from_station": c["from_station"],
+            "to_station": c["to_station"],
+            "travel_date": c["travel_date"].replace("-", "/"),
+            "travel_time": c["travel_time"],
+            "train_no": c.get("train_no", ""),
+            "adult_count": str(c["adult_count"]),
+            "seat_type": c.get("seat_type", "無座位偏好"),
+            "id_number": c["id_number"],
+            "phone": c["phone"],
+            "retry_interval": str(c["retry_interval"]),
+            "max_retries": str(c["max_retries"]),
+            "chat_id": str(chat_id),
+        }
+    }
+
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 204:
+            log.info(f"✅ GitHub Actions 訂票 workflow 已觸發")
+            return "github"
+        else:
+            log.error(f"GitHub Actions 觸發失敗: {r.status_code} {r.text}")
+            return ""
+    except Exception as e:
+        log.error(f"GitHub Actions API 錯誤: {e}")
+        return ""
+
+
+def start_booking(chat_id: str = "") -> str:
     c = booking_config
     missing = []
     if not c["id_number"]: missing.append("身分證字號 (/id)")
@@ -1376,15 +1428,43 @@ def start_booking() -> str:
     if booking_status["running"]:
         return f"⚠️ 訂票已在進行中（第 {booking_status['attempts']} 次）\n/stop 可停止"
 
+    search_hours = round(c['max_retries'] * c['retry_interval'] / 3600, 1)
+
+    # 優先使用 GitHub Actions（Playwright + 真實瀏覽器）
+    if GITHUB_TOKEN and GITHUB_REPO and chat_id:
+        result = trigger_github_booking(chat_id)
+        if result == "github":
+            booking_status["running"] = True
+            booking_status["attempts"] = 0
+            booking_status["last_result"] = None
+            # GitHub Actions 會自行通知結果，這裡設定一個超時自動 reset
+            def _auto_reset():
+                time.sleep(search_hours * 3600 + 300)  # 搜尋時間 + 5 分鐘緩衝
+                if booking_status["running"]:
+                    booking_status["running"] = False
+                    log.info("GitHub Actions 訂票超時自動 reset")
+            threading.Thread(target=_auto_reset, daemon=True).start()
+
+            return (
+                f"🚀 <b>訂票已透過 GitHub Actions 啟動！</b>\n"
+                f"─────────────────\n"
+                f"路線：{c['from_station']} → {c['to_station']}\n"
+                f"日期：{c['travel_date']}　時間：{c['travel_time']}\n"
+                f"人數：{c['adult_count']} 人\n"
+                f"─────────────────\n"
+                f"⏱ 每 {c['retry_interval']}s 搜尋，持續 {search_hours}h\n"
+                f"🌐 使用真實瀏覽器（Chromium）\n"
+                f"完成後自動通知 📩"
+            )
+
+    # 退回本地執行（相容舊邏輯）
     booking_status["running"] = True
     booking_status["attempts"] = 0
     booking_status["last_result"] = None
     threading.Thread(target=run_booking_thread, daemon=True).start()
 
-    search_hours = round(c['max_retries'] * c['retry_interval'] / 3600, 1)
-
     return (
-        f"🚅 <b>開始訂票！</b>\n"
+        f"🚅 <b>開始訂票！</b>（本地模式）\n"
         f"─────────────────\n"
         f"路線：{c['from_station']} → {c['to_station']}\n"
         f"日期：{c['travel_date']}　時間：{c['travel_time']}\n"
@@ -1736,13 +1816,13 @@ def telegram_webhook():
                 send_telegram(chat_id, f"❌ 找不到用戶 <code>{target_uid}</code>")
             return jsonify({"ok": True})
 
-        reply_text = process_command(cmd, args)
+        reply_text = process_command(cmd, args, chat_id)
         send_telegram(chat_id, reply_text)
         return jsonify({"ok": True})
 
     # 一般用戶：開放指令不需審核
     if cmd in OPEN_COMMANDS:
-        reply_text = process_command(cmd, args)
+        reply_text = process_command(cmd, args, chat_id)
         send_telegram(chat_id, reply_text)
         return jsonify({"ok": True})
 
@@ -1762,7 +1842,7 @@ def telegram_webhook():
         send_telegram(chat_id, f"⚠️ 帳號狀態：{user.get('status', '未知')}，無法使用此功能")
         return jsonify({"ok": True})
 
-    reply_text = process_command(cmd, args)
+    reply_text = process_command(cmd, args, chat_id)
     send_telegram(chat_id, reply_text)
     return jsonify({"ok": True})
 
@@ -1770,6 +1850,17 @@ def telegram_webhook():
 # ═══════════════════════════════════════════════════════════
 #  Health & API Routes
 # ═══════════════════════════════════════════════════════════
+
+@app.route("/api/booking-done", methods=["POST"])
+def booking_done():
+    """GitHub Actions 訂票完成時呼叫，重設 booking_status"""
+    data = request.get_json(silent=True) or {}
+    booking_status["running"] = False
+    booking_status["last_result"] = data.get("result", "GitHub Actions 完成")
+    booking_status["last_run"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log.info(f"GitHub Actions 訂票完成: {data.get('result', 'N/A')}")
+    return jsonify({"ok": True})
+
 
 @app.route("/api/health", methods=["GET"])
 def health():

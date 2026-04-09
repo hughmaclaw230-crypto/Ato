@@ -1,0 +1,84 @@
+name: THSR Booking
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_station:
+        description: '出發站'
+        required: true
+      to_station:
+        description: '到達站'
+        required: true
+      travel_date:
+        description: '日期 (YYYY/MM/DD)'
+        required: true
+      travel_time:
+        description: '時間 (HH:MM)'
+        required: true
+      train_no:
+        description: '車次號碼'
+        required: false
+        default: ''
+      adult_count:
+        description: '全票數量'
+        required: false
+        default: '1'
+      seat_type:
+        description: '座位偏好 (無座位偏好/靠窗/靠走道)'
+        required: false
+        default: '無座位偏好'
+      id_number:
+        description: '身分證字號'
+        required: true
+      phone:
+        description: '手機號碼'
+        required: true
+      retry_interval:
+        description: '搜尋間隔(秒)'
+        required: false
+        default: '5'
+      max_retries:
+        description: '最大嘗試次數'
+        required: false
+        default: '720'
+      chat_id:
+        description: 'Telegram Chat ID (結果通知)'
+        required: true
+
+jobs:
+  booking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 最長 6 小時
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install playwright numpy Pillow onnxruntime requests ddddocr
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Run booking
+        env:
+          THSR_FROM: ${{ inputs.from_station }}
+          THSR_TO: ${{ inputs.to_station }}
+          THSR_DATE: ${{ inputs.travel_date }}
+          THSR_TIME: ${{ inputs.travel_time }}
+          THSR_TRAIN_NO: ${{ inputs.train_no }}
+          THSR_ADULT_COUNT: ${{ inputs.adult_count }}
+          THSR_SEAT_TYPE: ${{ inputs.seat_type }}
+          THSR_ID: ${{ inputs.id_number }}
+          THSR_PHONE: ${{ inputs.phone }}
+          THSR_RETRY_INTERVAL: ${{ inputs.retry_interval }}
+          THSR_MAX_RETRIES: ${{ inputs.max_retries }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ inputs.chat_id }}
+        run: python booking_playwright.py
