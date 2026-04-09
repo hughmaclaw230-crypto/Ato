@@ -246,24 +246,69 @@ async def run_booking():
             log.info(f"── 第 {attempt}/{max_retries} 次嘗試 ──")
 
             try:
-                # ═══ Step 1: 打開訂票頁面 (嘗試多個 URL) ═══
+                # ═══ Step 1: 打開訂票頁面 ═══
+                # 策略: 先到高鐵官網 → 自然導航到訂票系統
                 page_loaded = False
-                for url_idx, booking_url in enumerate(BOOKING_URLS):
+
+                # 方法 A: 直接訪問訂票系統
+                try:
+                    log.info("嘗試直接連線 irs.thsrc.com.tw...")
+                    resp = await page.goto(
+                        "https://irs.thsrc.com.tw/IMINT/?locale=tw",
+                        wait_until="domcontentloaded",
+                        timeout=20000
+                    )
+                    if resp and resp.status < 400:
+                        page_loaded = True
+                        log.info(f"✅ 直連成功 (HTTP {resp.status})")
+                except Exception as e:
+                    log.warning(f"直連失敗: {str(e)[:60]}")
+
+                # 方法 B: 從官網入口自然導航
+                if not page_loaded:
                     try:
-                        log.info(f"嘗試 URL {url_idx+1}/{len(BOOKING_URLS)}: {booking_url[:50]}...")
-                        resp = await page.goto(booking_url, wait_until="domcontentloaded", timeout=60000)
+                        log.info("嘗試從官網入口導航...")
+                        await page.goto(
+                            "https://www.thsrc.com.tw/",
+                            wait_until="domcontentloaded",
+                            timeout=30000
+                        )
+                        await asyncio.sleep(2)
+
+                        # 在官網上找訂票連結並點擊
+                        booking_link = page.locator("a[href*='irs.thsrc.com.tw']").first
+                        if await booking_link.count() > 0:
+                            log.info("找到訂票連結，點擊中...")
+                            await booking_link.click()
+                            await page.wait_for_load_state("domcontentloaded", timeout=30000)
+                            page_loaded = True
+                            log.info("✅ 從官網導航成功")
+                        else:
+                            # 直接用 JS 導航
+                            log.info("未找到連結，用 JS 導航...")
+                            await page.evaluate("window.location.href = 'https://irs.thsrc.com.tw/IMINT/?locale=tw'")
+                            await page.wait_for_load_state("domcontentloaded", timeout=30000)
+                            page_loaded = True
+                    except Exception as e:
+                        log.warning(f"官網導航失敗: {str(e)[:60]}")
+
+                # 方法 C: 使用行動版入口
+                if not page_loaded:
+                    try:
+                        log.info("嘗試行動版入口...")
+                        resp = await page.goto(
+                            "https://irs.thsrc.com.tw/IMINT/?locale=tw&device=mobile",
+                            wait_until="domcontentloaded",
+                            timeout=30000
+                        )
                         if resp and resp.status < 400:
                             page_loaded = True
-                            log.info(f"✅ 頁面載入成功 (HTTP {resp.status})")
-                            break
-                        else:
-                            log.warning(f"HTTP {resp.status if resp else 'None'}")
+                            log.info("✅ 行動版入口成功")
                     except Exception as e:
-                        log.warning(f"URL {url_idx+1} 失敗: {str(e)[:80]}")
-                        continue
+                        log.warning(f"行動版失敗: {str(e)[:60]}")
 
                 if not page_loaded:
-                    log.error("所有 URL 都無法連線")
+                    log.error("所有入口都無法連線")
                     await asyncio.sleep(retry_interval)
                     continue
 
