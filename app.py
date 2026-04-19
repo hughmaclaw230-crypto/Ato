@@ -1212,41 +1212,31 @@ def get_config_summary() -> str:
 
 def get_help_text() -> str:
     return "\n".join([
-        "📖 <b>AutoTHSR 指令一覽</b>",
+        "🚅 <b>AutoTHSR 高鐵助手</b>",
+        "─────────────────────",
         "",
-        "🔍 <b>快速查詢（推薦）</b>",
-        "/search &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; [時間]",
-        "  <code>/search 高雄 台北 明天 18:00</code>",
-        "  <code>/search 左營 台北 後天</code>",
-        "  💡 /search （無參數）→ 互動表單",
+        "🔍 <b>查詢</b>",
+        "/search — 快速查高鐵時刻表",
+        "  <code>/search 台北 左營 明天 08:00</code>",
+        "/timetable — 進階時刻查詢",
+        "/stations — 車站列表",
         "",
-        "🗂 <b>進階時刻表</b>",
-        "/timetable &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; [時間]",
+        "🎫 <b>訂票</b>",
+        "/book — 開始訂票　　/stop — 停止",
+        "/status — 訂票狀態　/settings — 查看設定",
+        "/from /to /date /time — 設定路線",
+        "/count /seat /id /phone — 設定票務",
         "",
-        "🔧 <b>訂票設定</b>",
-        "/from /to /date /time /count /seat /id /phone",
-        "",
-        "🚀 <b>操作</b>",
-        "/book — 開始訂票 | /stop — 停止",
-        "/status — 狀態 | /settings — 設定",
-        "",
-        "🔍 <b>票券監控（搶票利器）</b>",
-        "/monitor &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; &lt;時間&gt; [班次] [間隔]",
+        "🔔 <b>票券監控</b> — 自動搶票通知",
+        "/monitor — 啟動監控",
         "  <code>/monitor 台北 左營 明天 08:00</code>",
-        "  <code>/monitor 台北 左營 明天 08:00 0605</code>  ← 指定班次",
-        "/stopmonitor — 停止監控",
+        "  <code>/monitor 台北 左營 明天 08:00 0605</code>",
         "/monitorstatus — 監控進度",
+        "/stopmonitor — 停止監控",
         "",
-        "📊 <b>其他</b>",
-        "/stations — 車站列表 | /help — 本說明",
-        "",
-        "🔐 <b>管理員指令</b>",
-        "/pending — 重發待審核名單",
-        "/listusers — 列出所有用戶",
-        "/approve <code>user_id</code> — 核准用戶",
-        "/reject <code>user_id</code> — 拒絕用戶",
-        "",
-        "🆘 <b>緊急指令</b>",
+        "🔐 <b>管理員</b>",
+        "/pending — 待審核　/listusers — 全部用戶",
+        "/approve &lt;id&gt; — 核准　/reject &lt;id&gt; — 拒絕",
         "/selfapprove — Super Admin 自我核准",
     ])
 
@@ -2220,25 +2210,41 @@ def register_telegram_webhook():
 def set_telegram_commands():
     if not TG_TOKEN:
         return
+
+    # 一般用戶選單（最多 100 個，按使用頻率排序）
     commands = [
-        {"command": "start", "description": "註冊 / 歡迎"},
-        {"command": "search", "description": "🔍 快速查詢時刻表"},
-        {"command": "help", "description": "顯示說明"},
-        {"command": "timetable", "description": "查詢高鐵時刻表（進階）"},
-        {"command": "settings", "description": "查看設定"},
-        {"command": "book", "description": "開始訂票"},
-        {"command": "stop", "description": "停止訂票"},
-        {"command": "status", "description": "訂票狀態"},
-        {"command": "stations", "description": "車站列表"},
-        {"command": "pending", "description": "🔐 待審核名單（管理員）"},
-        {"command": "listusers", "description": "🔐 所有用戶（管理員）"},
-        {"command": "approve", "description": "🔐 核准用戶（管理員）"},
-        {"command": "reject", "description": "🔐 拒絕用戶（管理員）"},
-        {"command": "selfapprove", "description": "🆘 Super Admin 自我核准"},
+        {"command": "search",        "description": "🔍 查高鐵時刻表"},
+        {"command": "monitor",       "description": "🔔 票券監控（搶票通知）"},
+        {"command": "book",          "description": "🚀 開始訂票"},
+        {"command": "status",        "description": "📊 查看狀態"},
+        {"command": "settings",      "description": "⚙️ 查看設定"},
+        {"command": "monitorstatus", "description": "📈 監控進度"},
+        {"command": "stopmonitor",   "description": "⏹ 停止監控"},
+        {"command": "stop",          "description": "🛑 停止訂票"},
+        {"command": "timetable",     "description": "🗂 進階時刻查詢"},
+        {"command": "stations",      "description": "🚉 車站列表"},
+        {"command": "help",          "description": "❓ 指令說明"},
     ]
     url = f"https://api.telegram.org/bot{TG_TOKEN}/setMyCommands"
     try:
+        # 設定一般選單
         requests.post(url, json={"commands": commands}, timeout=10)
+
+        # 管理員專屬選單（僅 Admin 可見）
+        if ADMIN_TG_CHAT_ID:
+            admin_commands = commands + [
+                {"command": "pending",     "description": "🔐 待審核名單"},
+                {"command": "listusers",   "description": "🔐 所有用戶"},
+                {"command": "approve",     "description": "🔐 核准用戶"},
+                {"command": "reject",      "description": "🔐 拒絕用戶"},
+                {"command": "selfapprove", "description": "🆘 Super Admin 自我核准"},
+            ]
+            admin_url = f"https://api.telegram.org/bot{TG_TOKEN}/setMyCommands"
+            requests.post(admin_url, json={
+                "commands": admin_commands,
+                "scope": {"type": "chat", "chat_id": int(ADMIN_TG_CHAT_ID)},
+            }, timeout=10)
+
         log.info("  ✅ Telegram 指令選單已設定")
     except Exception:
         pass
