@@ -1,0 +1,64 @@
+name: THSR Monitor
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_station:
+        description: '出發站'
+        required: true
+      to_station:
+        description: '到達站'
+        required: true
+      travel_date:
+        description: '日期 (YYYY/MM/DD)'
+        required: true
+      travel_time:
+        description: '時間 (HH:MM)'
+        required: true
+      check_interval:
+        description: '查無票冷卻間隔(秒)'
+        required: false
+        default: '90'
+      max_checks:
+        description: '最大監控輪數'
+        required: false
+        default: '200'
+      adult_count:
+        description: '全票數量'
+        required: false
+        default: '1'
+      chat_id:
+        description: 'Telegram Chat ID (結果通知)'
+        required: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 最長 6 小時
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install requests numpy Pillow onnxruntime ddddocr
+
+      - name: Run monitor
+        env:
+          MONITOR_FROM: ${{ inputs.from_station }}
+          MONITOR_TO: ${{ inputs.to_station }}
+          MONITOR_DATE: ${{ inputs.travel_date }}
+          MONITOR_TIME: ${{ inputs.travel_time }}
+          MONITOR_INTERVAL: ${{ inputs.check_interval }}
+          MONITOR_MAX_CHECKS: ${{ inputs.max_checks }}
+          MONITOR_ADULT_COUNT: ${{ inputs.adult_count }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ inputs.chat_id }}
+        run: python ticket_monitor.py

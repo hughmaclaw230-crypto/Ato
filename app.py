@@ -223,6 +223,26 @@ booking_status = {
     "attempts": 0,
 }
 
+# ── 票券監控狀態（獨立於訂票）──
+monitor_config = {
+    "from_station": "",
+    "to_station": "",
+    "travel_date": "",
+    "travel_time": "",
+    "check_interval": 90,   # 查無票冷卻秒數
+    "max_checks": 200,      # 最大監控輪數（約 5 小時）
+    "adult_count": 1,
+}
+
+monitor_status = {
+    "running": False,
+    "checks": 0,
+    "captcha_ok": 0,
+    "last_error": "",
+    "started_at": None,
+    "chat_id": "",
+}
+
 STATION_MAP = {
     "南港": "1", "台北": "2", "板橋": "3", "桃園": "4",
     "新竹": "5", "苗栗": "6", "台中": "7", "彰化": "8",
@@ -1154,7 +1174,7 @@ def handle_admin_callback(data: dict):
 # ═══════════════════════════════════════════════════════════
 
 # 不需要核准就能用的指令
-OPEN_COMMANDS = {"start", "help", "status", "search", "selfapprove"}
+OPEN_COMMANDS = {"start", "help", "status", "search", "selfapprove", "monitorstatus"}
 
 
 def get_config_summary() -> str:
@@ -1208,6 +1228,12 @@ def get_help_text() -> str:
         "🚀 <b>操作</b>",
         "/book — 開始訂票 | /stop — 停止",
         "/status — 狀態 | /settings — 設定",
+        "",
+        "🔍 <b>票券監控（搶票利器）</b>",
+        "/monitor &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; &lt;時間&gt; [間隔]",
+        "  <code>/monitor 台北 左營 明天 08:00</code>",
+        "/stopmonitor — 停止監控",
+        "/monitorstatus — 監控進度",
         "",
         "📊 <b>其他</b>",
         "/stations — 車站列表 | /help — 本說明",
@@ -1321,6 +1347,12 @@ def process_command(cmd: str, args: str, chat_id: str = "") -> str:
             return "❌ 請在 1-30 之間"
         except ValueError:
             return "❌ 請輸入數字"
+    elif cmd == "monitor":
+        return start_monitor(chat_id, args)
+    elif cmd == "stopmonitor":
+        return stop_monitor()
+    elif cmd == "monitorstatus":
+        return get_monitor_status_text()
     else:
         return f"❓ 未知指令 <code>/{cmd}</code>\n輸入 /help 查看所有指令"
 
@@ -1546,6 +1578,251 @@ def simulate_booking():
         "車次": "0605", "出發時間": f"{c['travel_date']} {c['travel_time']}",
         "座位": "8 車 12A",
     }
+
+
+# ═══════════════════════════════════════════════════════════
+#  票券監控（不訂票，只監控有無票並通知）
+# ═══════════════════════════════════════════════════════════
+
+def trigger_github_monitor(chat_id: str) -> str:
+    """透過 GitHub Actions 執行票券監控"""
+    mc = monitor_config
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        return ""
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/monitor.yml/dispatches"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    payload = {
+        "ref": "main",
+        "inputs": {
+            "from_station": mc["from_station"],
+            "to_station": mc["to_station"],
+            "travel_date": mc["travel_date"].replace("-", "/"),
+            "travel_time": mc["travel_time"],
+            "check_interval": str(mc["check_interval"]),
+            "max_checks": str(mc["max_checks"]),
+            "adult_count": str(mc["adult_count"]),
+            "chat_id": str(chat_id),
+        }
+    }
+
+    try:
+        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 204:
+            log.info("✅ GitHub Actions 監控 workflow 已觸發")
+            return "github"
+        else:
+            log.error(f"GitHub Actions 觸發失敗: {r.status_code} {r.text}")
+            return ""
+    except Exception as e:
+        log.error(f"GitHub Actions API 錯誤: {e}")
+        return ""
+
+
+def start_monitor(chat_id: str, args: str = "") -> str:
+    """啟動票券監控"""
+    mc = monitor_config
+
+    # 解析參數: /monitor 出發站 到達站 日期 時間 [間隔]
+    if args.strip():
+        parts = args.strip().split()
+        if len(parts) >= 4:
+            from_st, to_st = parts[0], parts[1]
+            # 站名別名處理
+            alias = {"高雄": "左營", "北車": "台北", "北": "台北", "高": "左營"}
+            from_st = alias.get(from_st, from_st)
+            to_st = alias.get(to_st, to_st)
+
+            if from_st not in STATION_MAP:
+                return f"❌ 無效出發站「{from_st}」\n🚉 {' '.join(STATION_NAMES)}"
+            if to_st not in STATION_MAP:
+                return f"❌ 無效到達站「{to_st}」\n🚉 {' '.join(STATION_NAMES)}"
+
+            # 日期解析
+            date_str = parts[2]
+            if date_str == "今天":
+                date_str = datetime.now().strftime("%Y/%m/%d")
+            elif date_str == "明天":
+                date_str = (datetime.now() + timedelta(days=1)).strftime("%Y/%m/%d")
+            elif date_str == "後天":
+                date_str = (datetime.now() + timedelta(days=2)).strftime("%Y/%m/%d")
+            else:
+                date_str = date_str.replace("-", "/")
+
+            mc["from_station"] = from_st
+            mc["to_station"] = to_st
+            mc["travel_date"] = date_str
+            mc["travel_time"] = parts[3]
+            if len(parts) >= 5:
+                try:
+                    mc["check_interval"] = int(parts[4])
+                except ValueError:
+                    pass
+        else:
+            return "\n".join([
+                "❌ 參數不足",
+                "",
+                "📝 <b>用法：</b>",
+                "<code>/monitor 出發站 到達站 日期 時間 [間隔秒數]</code>",
+                "",
+                "📝 <b>範例：</b>",
+                "<code>/monitor 台北 左營 明天 08:00</code>",
+                "<code>/monitor 南港 台中 2026/04/25 18:00 60</code>",
+                "",
+                "💡 間隔預設 90 秒",
+            ])
+
+    # 檢查必要欄位
+    missing = []
+    if not mc["from_station"]: missing.append("出發站")
+    if not mc["to_station"]: missing.append("到達站")
+    if not mc["travel_date"]: missing.append("日期")
+    if not mc["travel_time"]: missing.append("時間")
+    if missing:
+        return (
+            "❌ <b>缺少監控參數：</b>\n"
+            + "\n".join(f"  • {m}" for m in missing)
+            + "\n\n💡 用法: <code>/monitor 出發站 到達站 日期 時間</code>"
+        )
+
+    if monitor_status["running"]:
+        return (
+            f"⚠️ 監控已在進行中\n"
+            f"已完成 {monitor_status['checks']} 輪\n"
+            f"路線：{mc['from_station']} → {mc['to_station']}\n"
+            f"/stopmonitor 可停止"
+        )
+
+    hours = round(mc['max_checks'] * mc['check_interval'] / 3600, 1)
+
+    # 優先使用 GitHub Actions
+    if GITHUB_TOKEN and GITHUB_REPO and chat_id:
+        result = trigger_github_monitor(chat_id)
+        if result == "github":
+            monitor_status["running"] = True
+            monitor_status["checks"] = 0
+            monitor_status["started_at"] = datetime.now().isoformat()
+            monitor_status["chat_id"] = chat_id
+
+            # 自動 reset 超時
+            def _auto_reset():
+                time.sleep(hours * 3600 + 300)
+                if monitor_status["running"]:
+                    monitor_status["running"] = False
+                    log.info("GitHub Actions 監控超時自動 reset")
+            threading.Thread(target=_auto_reset, daemon=True).start()
+
+            return "\n".join([
+                "🔍 <b>票券監控已透過 GitHub Actions 啟動！</b>",
+                "═════════════════",
+                f"🚉 路線：{mc['from_station']} → {mc['to_station']}",
+                f"📅 日期：{mc['travel_date']}　🕐 {mc['travel_time']}",
+                f"⏱ 每 {mc['check_interval']}s 查詢，持續 {hours}h",
+                "═════════════════",
+                "",
+                "📢 找到票時自動通知",
+                "⏹ /stopmonitor 可停止",
+                "📊 /monitorstatus 查看進度",
+            ])
+
+    # 本地執行
+    monitor_status["running"] = True
+    monitor_status["checks"] = 0
+    monitor_status["captcha_ok"] = 0
+    monitor_status["last_error"] = ""
+    monitor_status["started_at"] = datetime.now().isoformat()
+    monitor_status["chat_id"] = chat_id
+    threading.Thread(target=run_monitor_thread, args=(chat_id,), daemon=True).start()
+
+    return "\n".join([
+        "🔍 <b>票券監控啟動！</b>（本地模式）",
+        "═════════════════",
+        f"🚉 路線：{mc['from_station']} → {mc['to_station']}",
+        f"📅 日期：{mc['travel_date']}　🕐 {mc['travel_time']}",
+        f"⏱ 每 {mc['check_interval']}s 查詢，持續 {hours}h",
+        "═════════════════",
+        "",
+        "📢 找到票時自動通知",
+        "⏹ /stopmonitor 可停止",
+        "📊 /monitorstatus 查看進度",
+    ])
+
+
+def run_monitor_thread(chat_id: str):
+    """監控執行緒"""
+    def _notify(msg: str):
+        send_telegram(chat_id, msg)
+
+    try:
+        from ticket_monitor import run_monitor
+        result = run_monitor(monitor_config, monitor_status, notify_fn=_notify)
+    except ImportError as e:
+        log.error(f"ticket_monitor 模組載入失敗: {e}")
+        send_telegram(chat_id, f"❌ 監控模組載入失敗: {e}")
+        result = {"found": False, "error": str(e)}
+    except Exception as e:
+        log.error(f"監控例外: {e}")
+        send_telegram(chat_id, f"❌ 監控發生錯誤: {e}")
+        result = {"found": False, "error": str(e)}
+
+    monitor_status["running"] = False
+    log.info(f"監控結束: {result}")
+
+
+def stop_monitor() -> str:
+    """停止票券監控"""
+    if monitor_status["running"]:
+        monitor_status["running"] = False
+        mc = monitor_config
+        return "\n".join([
+            "🛑 <b>監控已停止</b>",
+            f"已完成 {monitor_status['checks']} 輪",
+            f"路線：{mc['from_station']} → {mc['to_station']}",
+        ])
+    return "📋 目前沒有正在進行的監控"
+
+
+def get_monitor_status_text() -> str:
+    """取得監控狀態文字"""
+    mc = monitor_config
+    ms = monitor_status
+
+    if ms["running"]:
+        elapsed = ""
+        if ms["started_at"]:
+            try:
+                start = datetime.fromisoformat(ms["started_at"])
+                delta = datetime.now() - start
+                mins = int(delta.total_seconds() // 60)
+                elapsed = f"\n⏱ 已運行 {mins} 分鐘"
+            except Exception:
+                pass
+
+        return "\n".join([
+            "🔍 <b>監控進行中</b>",
+            "═════════════════",
+            f"🚉 路線：{mc['from_station']} → {mc['to_station']}",
+            f"📅 日期：{mc['travel_date']}　🕐 {mc['travel_time']}",
+            f"🔄 已完成 {ms['checks']} / {mc['max_checks']} 輪",
+            f"✅ 驗證碼通過 {ms['captcha_ok']} 次",
+            f"📝 最後狀態：{ms['last_error'] or '正常'}",
+            elapsed,
+            "",
+            "⏹ /stopmonitor 可停止",
+        ])
+    else:
+        if mc["from_station"] and mc["travel_date"]:
+            return "\n".join([
+                "📋 <b>監控未執行</b>",
+                f"上次設定：{mc['from_station']} → {mc['to_station']}",
+                f"日期：{mc['travel_date']}　時間：{mc['travel_time']}",
+                "",
+                "💡 /monitor 重新啟動",
+            ])
+        return "📋 目前沒有監控任務\n💡 /monitor 出發站 到達站 日期 時間"
 
 
 # ═══════════════════════════════════════════════════════════
