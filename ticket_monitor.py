@@ -358,7 +358,7 @@ def run_monitor(config: dict, status: dict, notify_fn=None) -> dict:
                     notify_msg = "\n".join([
                         "🎉🎉🎉",
                         "",
-                        f"✅ 高鐵有票了！",
+                        f"✅ <b>高鐵有票了！</b>",
                         f"═══════════════",
                         f"🚉 {from_name} → {to_name}",
                         f"📅 {date_val}　🕐 {time_str} 起",
@@ -368,11 +368,13 @@ def run_monitor(config: dict, status: dict, notify_fn=None) -> dict:
                         "",
                         f"═══════════════",
                         f"🔄 共監控 {check_round} 輪",
-                        f"",
-                        f"⚡ 請立即前往訂票：",
-                        f"https://irs.thsrc.com.tw/IMINT/",
-                        f"",
-                        f"💡 或使用 /book 自動訂票",
+                        "",
+                        "⚡ <b>立即訂票：</b>",
+                        '🖥 <a href="https://irs.thsrc.com.tw/IMINT/?locale=tw">電腦版訂票</a>',
+                        '📱 <a href="https://m.thsrc.com.tw/tw/TimeTable/SearchResult">行動版訂票</a>',
+                        '🏪 <a href="https://www.thsrc.com.tw/ArticleContent/a3b630bb-1066-4352-a1ef-58c7b4e8ef7c">超商取票</a>',
+                        "",
+                        "💡 或使用 /book 自動訂票",
                     ])
                     _notify(notify_msg)
 
