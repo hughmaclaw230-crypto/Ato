@@ -232,6 +232,7 @@ monitor_config = {
     "check_interval": 90,   # 查無票冷卻秒數
     "max_checks": 200,      # 最大監控輪數（約 5 小時）
     "adult_count": 1,
+    "target_train": "",     # 指定班次（如 "0605"），空白=全部班次
 }
 
 monitor_status = {
@@ -1230,8 +1231,9 @@ def get_help_text() -> str:
         "/status — 狀態 | /settings — 設定",
         "",
         "🔍 <b>票券監控（搶票利器）</b>",
-        "/monitor &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; &lt;時間&gt; [間隔]",
+        "/monitor &lt;出發站&gt; &lt;到達站&gt; &lt;日期&gt; &lt;時間&gt; [班次] [間隔]",
         "  <code>/monitor 台北 左營 明天 08:00</code>",
+        "  <code>/monitor 台北 左營 明天 08:00 0605</code>  ← 指定班次",
         "/stopmonitor — 停止監控",
         "/monitorstatus — 監控進度",
         "",
@@ -1656,23 +1658,28 @@ def start_monitor(chat_id: str, args: str = "") -> str:
             mc["to_station"] = to_st
             mc["travel_date"] = date_str
             mc["travel_time"] = parts[3]
-            if len(parts) >= 5:
-                try:
-                    mc["check_interval"] = int(parts[4])
-                except ValueError:
-                    pass
+            mc["target_train"] = ""  # 預設清除
+            # 解析第 5~6 個參數：班次 / 間隔
+            for extra in parts[4:]:
+                if extra.isdigit() and len(extra) <= 4 and int(extra) < 30:
+                    mc["check_interval"] = int(extra)
+                elif extra.isdigit() and int(extra) >= 30:
+                    mc["check_interval"] = int(extra)
+                else:
+                    mc["target_train"] = extra  # 班次編號（如 0605）
         else:
             return "\n".join([
                 "❌ 參數不足",
                 "",
                 "📝 <b>用法：</b>",
-                "<code>/monitor 出發站 到達站 日期 時間 [間隔秒數]</code>",
+                "<code>/monitor 出發站 到達站 日期 時間 [班次] [間隔]</code>",
                 "",
                 "📝 <b>範例：</b>",
                 "<code>/monitor 台北 左營 明天 08:00</code>",
-                "<code>/monitor 南港 台中 2026/04/25 18:00 60</code>",
+                "<code>/monitor 台北 左營 明天 08:00 0605</code>  ← 只監控 0605 班次",
+                "<code>/monitor 南港 台中 2026/04/25 18:00 0809 60</code>",
                 "",
-                "💡 間隔預設 90 秒",
+                "💡 間隔預設 90 秒，班次留空=全部班次",
             ])
 
     # 檢查必要欄位
@@ -1715,12 +1722,14 @@ def start_monitor(chat_id: str, args: str = "") -> str:
                     log.info("GitHub Actions 監控超時自動 reset")
             threading.Thread(target=_auto_reset, daemon=True).start()
 
+            train_note = f"\n🎯 指定班次：{mc['target_train']}" if mc['target_train'] else ""
             return "\n".join([
                 "🔍 <b>票券監控已透過 GitHub Actions 啟動！</b>",
                 "═════════════════",
                 f"🚉 路線：{mc['from_station']} → {mc['to_station']}",
                 f"📅 日期：{mc['travel_date']}　🕐 {mc['travel_time']}",
                 f"⏱ 每 {mc['check_interval']}s 查詢，持續 {hours}h",
+                train_note,
                 "═════════════════",
                 "",
                 "📢 找到票時自動通知",
@@ -1737,12 +1746,14 @@ def start_monitor(chat_id: str, args: str = "") -> str:
     monitor_status["chat_id"] = chat_id
     threading.Thread(target=run_monitor_thread, args=(chat_id,), daemon=True).start()
 
+    train_note = f"\n🎯 指定班次：{mc['target_train']}" if mc['target_train'] else ""
     return "\n".join([
         "🔍 <b>票券監控啟動！</b>（本地模式）",
         "═════════════════",
         f"🚉 路線：{mc['from_station']} → {mc['to_station']}",
         f"📅 日期：{mc['travel_date']}　🕐 {mc['travel_time']}",
         f"⏱ 每 {mc['check_interval']}s 查詢，持續 {hours}h",
+        train_note,
         "═════════════════",
         "",
         "📢 找到票時自動通知",

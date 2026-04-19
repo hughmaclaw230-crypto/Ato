@@ -1,0 +1,30 @@
+rules_version = '2';
+
+// ═══════════════════════════════════════════════════════════
+//  AutoTHSR Firestore Security Rules
+//  
+//  設計原則：所有資料操作均透過 Server-side Firebase Admin SDK
+//  (Service Account) 執行，Admin SDK 會完全繞過這些安全規則。
+//  因此，正確做法是「全面拒絕」所有 Client-side (Web/Mobile SDK) 存取，
+//  防止未授權的前端直接讀寫資料庫。
+//  
+//  最後更新：2026-04-07
+// ═══════════════════════════════════════════════════════════
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── users collection ──
+    // 所有 CRUD 操作透過 Flask backend (Admin SDK) 處理
+    // Client-side 完全禁止
+    match /users/{userId} {
+      allow read, write: if false;
+    }
+
+    // ── 全域 fallback ──
+    // 封鎖所有未明確定義的 collection
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -105,17 +105,18 @@ def preprocess_for_cnn(img_bytes: bytes) -> np.ndarray:
 def _remove_arc_for_cnn(arr: np.ndarray) -> np.ndarray:
     """
     使用多項式回歸擬合並移除弧線。
-    與 hyiche 的 remove_curve 函數邏輯相同。
+    參數對齊 maxmilian/thsrc_captcha:
+    - 左邊margin=14, 右邊margin=7, offset=4, degree=2
     """
     try:
         height, width = arr.shape
         # 只取左右邊緣的白色像素來擬合弧線
+        # maxmilian/thsrc_captcha: img[:, 14:WIDTH - 7] = 0
         mask = arr.copy()
-        margin = 5
-        mask[:, margin:width - margin] = 0
+        mask[:, 14:width - 7] = 0
 
         ys, xs = np.where(mask == 255)
-        if len(xs) < 5:
+        if len(xs) < 3:
             return arr  # 找不到足夠的邊緣點
 
         # 將 y 坐標反轉（畫面座標 → 數學座標）
@@ -125,11 +126,12 @@ def _remove_arc_for_cnn(arr: np.ndarray) -> np.ndarray:
         poly = np.poly1d(coeffs)
 
         result = arr.copy()
+        offset = 4  # maxmilian/thsrc_captcha: offset = 4
         for x in range(width):
             y_pred = height - int(round(poly(x)))
-            y_start = max(0, y_pred - 3)
-            y_end = min(height, y_pred + 3)
-            # 弧線處黑白互換（與 hyiche 的方法一致）
+            y_start = max(0, y_pred - offset)
+            y_end = min(height, y_pred + offset)
+            # 弧線處黑白互換
             result[y_start:y_end, x] = 255 - result[y_start:y_end, x]
 
         return result

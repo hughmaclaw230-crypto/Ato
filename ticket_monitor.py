@@ -343,8 +343,18 @@ def run_monitor(config: dict, status: dict, notify_fn=None) -> dict:
 
                     status["captcha_ok"] += 1
                     trains = _parse_available_trains(result_html)
-                    train_count = len(trains)
 
+                    # 指定班次過濾
+                    target_train = config.get("target_train", "").strip()
+                    if target_train:
+                        matched = [t for t in trains if target_train in t.get("train_no", "")]
+                        if not matched:
+                            log.info(f"⏳ R{check_round}: 有 {len(trains)} 班次，但不含指定班次 {target_train}，繼續監控...")
+                            status["last_error"] = f"有票但非指定班次 {target_train}"
+                            break  # 進入冷卻，等下一輪
+                        trains = matched
+
+                    train_count = len(trains)
                     log.info(f"🎉 第 {check_round} 輪：找到 {train_count} 個可訂票班次！")
 
                     # 組合通知訊息
@@ -355,6 +365,8 @@ def run_monitor(config: dict, status: dict, notify_fn=None) -> dict:
                         arr = t.get("arrive", "?")
                         train_lines.append(f"  🚅 {no}  {dep} → {arr}")
 
+                    target_note = f"\n🎯 指定班次：{target_train}" if target_train else ""
+
                     notify_msg = "\n".join([
                         "🎉🎉🎉",
                         "",
@@ -363,6 +375,7 @@ def run_monitor(config: dict, status: dict, notify_fn=None) -> dict:
                         f"🚉 {from_name} → {to_name}",
                         f"📅 {date_val}　🕐 {time_str} 起",
                         f"🎫 找到 {train_count} 個班次",
+                        target_note,
                         "",
                         *train_lines,
                         "",
@@ -372,7 +385,6 @@ def run_monitor(config: dict, status: dict, notify_fn=None) -> dict:
                         "⚡ <b>立即訂票：</b>",
                         '🖥 <a href="https://irs.thsrc.com.tw/IMINT/?locale=tw">電腦版訂票</a>',
                         '📱 <a href="https://m.thsrc.com.tw/tw/TimeTable/SearchResult">行動版訂票</a>',
-                        '🏪 <a href="https://www.thsrc.com.tw/ArticleContent/a3b630bb-1066-4352-a1ef-58c7b4e8ef7c">超商取票</a>',
                         "",
                         "💡 或使用 /book 自動訂票",
                     ])
